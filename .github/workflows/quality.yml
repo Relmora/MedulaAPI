@@ -1,0 +1,71 @@
+name: Quality Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend checks
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --locked --python 3.12
+
+      - name: Check Python lint
+        run: uv run --locked ruff check .
+
+      - name: Check Python formatting
+        run: uv run --locked ruff format --check .
+
+      - name: Run backend tests
+        run: uv run --locked pytest -q
+
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check frontend lint
+        run: npm run lint
+
+      - name: Check TypeScript and build frontend
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: http://127.0.0.1:8000
