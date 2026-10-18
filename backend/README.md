@@ -293,7 +293,52 @@ origins with wildcards or derive trust from the Host header. Non-browser clients
 may omit Origin. Future cookie-authenticated write endpoints must apply CSRF
 protection as well.
 
-Refresh rotation and logout endpoints are NOT implemented in this step. After
-15 minutes, sign in again until refresh is implemented. No migration is needed.
+Refresh rotation and logout endpoints are implemented in the following sections. No migration is needed.
 Shared rate limits, compromised-password screening, PostgreSQL concurrency tests,
 and deployment load testing remain required before production release.
+
+## Refresh rotation (step 6)
+
+`POST /auth/refresh` with JSON `{}` uses the HttpOnly refresh cookie, not the access
+JWT. A successful response is 204 with new cookies. The database performs an
+atomic compare-and-swap of the old refresh verifier; only one request using that
+verifier can succeed. The original session deadline never moves. Cookie lifetimes
+and the new access JWT expiry are capped by the remaining session lifetime.
+Invalid/expired/revoked/inactive-account credentials return REFRESH_REJECTED (401).
+Stale requests never clear cookies or revoke the session, avoiding destruction of
+a concurrent successful refresh. No migration is required.
+
+This implements single-use rotation, not historical token-family replay detection:
+old verifiers are replaced, not retained. A replay cannot refresh, but does not
+revoke a successor that may have been issued to an attacker. A lost successful
+refresh response can require signing in again. Historical replay policy and
+PostgreSQL multi-connection concurrency tests remain production hardening work.
+
+Frontend refresh integration is deferred. Current work is backend-only.
+The future client will need coordinated refresh requests and bounded retries;
+the browser does not call the refresh endpoint automatically.
+
+## Logout (step 7)
+
+Send JSON `{}` to `POST /auth/logout` to revoke the current session and clear both
+cookies using their original paths. It returns 204 even if already logged out.
+A signed expired access JWT may identify its own session for revocation only;
+otherwise the current refresh cookie identifies the session. This permits logout
+when the browser has already discarded an expired access cookie. Invalid tokens
+never select arbitrary sessions. Database changes commit before clearing cookies.
+
+`POST /auth/logout-all` requires a currently valid access JWT and active account/
+session; refresh first if access has expired. It revokes the user's existing
+sessions and clears cookies on the calling browser. Other browsers keep their
+cookies but fail subsequent authentication and refresh checks. Both endpoints
+apply the existing origin and JSON checks and return no-store responses.
+
+Revoked rows remain for inspection; `revoked_at` is populated instead of deleting
+them. Logout does not cancel requests already authorized or prevent a new login
+with valid credentials. Sessions from logins concurrent with logout-all may be
+outside its database statement snapshot; stronger account-wide serialization
+requires further design. PostgreSQL multi-connection race verification remains
+pending. No migration or frontend change is required.
+
+Manual check: login, call /me (200), logout with {}, then /me (401). For logout-all,
+log in from two browsers and confirm both are rejected after either logs out all.

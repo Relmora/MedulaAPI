@@ -226,3 +226,243 @@ def test_secure_cookie_configuration(registration_client, monkeypatch):
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
     response = client.post("/auth/register", json=PAYLOAD)
     assert all("Secure" in value for value in response.headers.get_list("set-cookie"))
+
+
+def test_refresh_rotates_and_rejects_old_token_without_revoking_session(
+    registration_client,
+):
+    import hashlib
+
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    old = client.cookies.get("refresh_token")
+    with Session(engine) as db:
+        deadline = db.scalar(select(AuthSession)).expires_at
+    response = client.post("/auth/refresh", json={})
+    assert response.status_code == 204
+    new = client.cookies.get("refresh_token")
+    assert new != old
+    with Session(engine) as db:
+        record = db.scalar(select(AuthSession))
+        assert record.expires_at == deadline
+        assert record.refresh_token_hash == hashlib.sha256(new.encode()).hexdigest()
+    assert client.get("/auth/me").status_code == 200
+    response = client.post(
+        "/auth/refresh", json={}, headers={"Cookie": f"refresh_token={old}"}
+    )
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+    assert client.get("/auth/me").status_code == 200
+    assert client.post("/auth/refresh", json={}).status_code == 204
+
+
+@pytest.mark.parametrize(
+    "case", ["missing", "invalid", "revoked", "expired", "disabled"]
+)
+def test_refresh_rejects_unusable_credentials(registration_client, case):
+    from datetime import UTC, datetime, timedelta
+
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    if case == "missing":
+        client.cookies.clear()
+    elif case == "invalid":
+        client.cookies.clear()
+        client.cookies.set("refresh_token", "invalid")
+    else:
+        with Session(engine) as db:
+            record = db.scalar(select(AuthSession))
+            if case == "revoked":
+                record.revoked_at = datetime.now(UTC)
+            elif case == "expired":
+                record.created_at = datetime.now(UTC) - timedelta(days=2)
+                record.expires_at = datetime.now(UTC) - timedelta(days=1)
+            else:
+                db.scalar(select(User)).is_active = False
+            db.commit()
+    response = client.post("/auth/refresh", json={})
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+
+
+def test_refresh_works_without_access_and_caps_expiry(registration_client):
+    from datetime import UTC, datetime, timedelta
+
+    import jwt
+
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    raw = client.cookies.get("refresh_token")
+    with Session(engine) as db:
+        record = db.scalar(select(AuthSession))
+        record.expires_at = datetime.now(UTC) + timedelta(seconds=60)
+        db.commit()
+    client.cookies.clear()
+    client.cookies.set("refresh_token", raw)
+    response = client.post("/auth/refresh", json={})
+    assert response.status_code == 204
+    claims = jwt.decode(
+        client.cookies.get("access_token"), options={"verify_signature": False}
+    )
+    assert 0 < claims["exp"] - datetime.now(UTC).timestamp() <= 60
+    assert all(
+        "Max-Age=59" in cookie or "Max-Age=60" in cookie
+        for cookie in response.headers.get_list("set-cookie")
+    )
+
+
+def test_refresh_checks_origin(registration_client):
+    client, _ = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    assert (
+        client.post(
+            "/auth/refresh", json={}, headers={"Origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
+
+
+def test_logout_revokes_only_current_session_and_clears_cookies(registration_client):
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    first_access = client.cookies.get("access_token")
+    first_refresh = client.cookies.get("refresh_token")
+    client.post("/auth/login", json=PAYLOAD)
+    second_access = client.cookies.get("access_token")
+    second_refresh = client.cookies.get("refresh_token")
+    response = client.post("/auth/logout", json={})
+    assert response.status_code == 204
+    assert response.headers["cache-control"] == "no-store"
+    deleted = response.headers.get_list("set-cookie")
+    assert len(deleted) == 2
+    assert all("Max-Age=0" in value and "HttpOnly" in value for value in deleted)
+    assert client.get("/auth/me").status_code == 401
+    assert (
+        client.get(
+            "/auth/me", headers={"Cookie": f"access_token={second_access}"}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/auth/refresh",
+            json={},
+            headers={"Cookie": f"refresh_token={second_refresh}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            "/auth/me", headers={"Cookie": f"access_token={first_access}"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/auth/refresh",
+            json={},
+            headers={"Cookie": f"refresh_token={first_refresh}"},
+        ).status_code
+        == 204
+    )
+    with Session(engine) as db:
+        records = db.scalars(select(AuthSession)).all()
+        assert sum(record.revoked_at is not None for record in records) == 1
+
+
+def test_logout_without_access_uses_refresh_and_is_idempotent(registration_client):
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    refresh = client.cookies.get("refresh_token")
+    client.cookies.clear()
+    client.cookies.set("refresh_token", refresh)
+    assert client.post("/auth/logout", json={}).status_code == 204
+    client.cookies.clear()
+    assert client.post("/auth/logout", json={}).status_code == 204
+    with Session(engine) as db:
+        assert db.scalar(select(AuthSession)).revoked_at is not None
+
+
+def test_logout_all_does_not_affect_another_user(registration_client):
+    client, engine = registration_client
+    client.post("/auth/register", json={**PAYLOAD, "username": "bob"})
+    bob_access = client.cookies.get("access_token")
+    client.post("/auth/register", json=PAYLOAD)
+    alice_first = client.cookies.get("access_token")
+    alice_refresh = client.cookies.get("refresh_token")
+    client.post("/auth/login", json=PAYLOAD)
+    alice_second = client.cookies.get("access_token")
+    response = client.post("/auth/logout-all", json={})
+    assert response.status_code == 204
+    assert len(response.headers.get_list("set-cookie")) == 2
+    for access in (alice_first, alice_second):
+        assert (
+            client.get(
+                "/auth/me", headers={"Cookie": f"access_token={access}"}
+            ).status_code
+            == 401
+        )
+    assert (
+        client.post(
+            "/auth/refresh",
+            json={},
+            headers={"Cookie": f"refresh_token={alice_refresh}"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            "/auth/me", headers={"Cookie": f"access_token={bob_access}"}
+        ).status_code
+        == 200
+    )
+
+
+@pytest.mark.parametrize("endpoint", ["/auth/logout", "/auth/logout-all"])
+def test_logout_origin_rejection_preserves_session(registration_client, endpoint):
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    response = client.post(
+        endpoint, json={}, headers={"Origin": "https://evil.example"}
+    )
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+    assert client.get("/auth/me").status_code == 200
+
+
+def test_logout_all_requires_authenticated_user(registration_client):
+    client, _ = registration_client
+    assert client.post("/auth/logout-all", json={}).status_code == 401
+
+
+def test_logout_commit_failure_does_not_claim_success(registration_client, monkeypatch):
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+
+    def fail(*args):
+        raise RuntimeError("simulated commit failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Session, "commit", fail)
+        response = client.post("/auth/logout", json={})
+    assert response.status_code == 500
+    assert "set-cookie" not in response.headers
+    assert client.get("/auth/me").status_code == 200
+
+
+def test_logout_allows_expired_signed_access_only_for_revocation(registration_client):
+    import jwt
+
+    client, engine = registration_client
+    client.post("/auth/register", json=PAYLOAD)
+    claims = jwt.decode(
+        client.cookies.get("access_token"), options={"verify_signature": False}
+    )
+    claims["exp"] = 1
+    expired = jwt.encode(claims, "test-only-key-" * 4, algorithm="HS256")
+    client.cookies.clear()
+    client.cookies.set("access_token", expired)
+    assert client.get("/auth/me").status_code == 401
+    assert client.post("/auth/logout", json={}).status_code == 204
+    with Session(engine) as db:
+        assert db.scalar(select(AuthSession)).revoked_at is not None
