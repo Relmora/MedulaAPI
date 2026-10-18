@@ -1,9 +1,15 @@
+from typing import Literal
+
 from pydantic import AnyHttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     cors_allowed_origins: list[AnyHttpUrl] = [AnyHttpUrl("http://localhost:5173")]
+
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    registration_enabled: bool = False
 
     db_host: str = "::1"
     db_port: int = 5432
