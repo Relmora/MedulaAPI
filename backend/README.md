@@ -254,6 +254,7 @@ Raise an expected public error using:
 
 ```python
 from backend.errors import AppError
+
 raise AppError("USERNAME_UNAVAILABLE", "Username is unavailable.", 409)
 ```
 
