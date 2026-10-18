@@ -217,7 +217,7 @@ does not change the database schema and requires no migration.
 Set `REGISTRATION_ENABLED=true` in your private `.env` and restart the API to
 allow `POST /auth/register`. It defaults to false. Submit JSON with `username`
 and `password`; success returns HTTP 201 with only `id`, `username`, and
-`created_at`. Registration does not create a session or cookies.
+`created_at`. Registration now also creates a session and sets login cookies (see step 5).
 Usernames are trimmed/lowercased and limited to 3-64 ASCII letters, digits,
 underscores, dots and hyphens. Passwords are 15-128 characters, preserved exactly.
 Duplicate normalized usernames return 409; this intentionally exposes username
@@ -269,3 +269,31 @@ Uvicorn's duplicate raw-URL access logs. This config owns the `backend` logger
 namespace; Uvicorn lifecycle and third-party logs retain their own configuration.
 Review server/proxy log policy separately for production. No database migration
 is needed for logging or error handling.
+
+## Login and session issuance (step 5)
+
+`POST /auth/register` creates the user and session atomically, then sets cookies.
+`POST /auth/login` accepts username/password and creates a session for an existing
+active user. `GET /auth/me` returns the authenticated user after validating JWT
+claims, stored session status/expiry, and account status. Database failures fail
+closed. Tokens never appear in JSON responses or application logs.
+
+Configure a cryptographically random `AUTH_SIGNING_KEY` of at least 32 bytes in
+your private environment. For localhost HTTP only, set `AUTH_COOKIE_SECURE=false`;
+production HTTPS must use true (the default). Access JWTs expire in 15 minutes;
+sessions and random refresh credentials expire after 7 days. The database stores
+only a SHA-256 verifier of the high-entropy refresh credential. Access cookies
+use Path=/; refresh cookies use Path=/auth. Both are HttpOnly, SameSite=Lax,
+host-only cookies. CORS permits credentialed requests from configured origins;
+React must use `credentials: "include"`. Use the same hostname consistently.
+
+Signup/login require JSON. Browser Origin is checked against explicit
+AUTH_ALLOWED_ORIGINS and cross-site fetches are rejected; do not broaden these
+origins with wildcards or derive trust from the Host header. Non-browser clients
+may omit Origin. Future cookie-authenticated write endpoints must apply CSRF
+protection as well.
+
+Refresh rotation and logout endpoints are NOT implemented in this step. After
+15 minutes, sign in again until refresh is implemented. No migration is needed.
+Shared rate limits, compromised-password screening, PostgreSQL concurrency tests,
+and deployment load testing remain required before production release.

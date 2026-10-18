@@ -17,7 +17,7 @@ app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[str(origin).rstrip("/") for origin in settings.cors_allowed_origins],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
     expose_headers=["X-Request-ID"],
