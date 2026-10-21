@@ -6,6 +6,7 @@ from backend.config import Settings
 from backend.errors import install_error_handlers
 from backend.logging import configure_logging
 from backend.middleware import RequestLoggingMiddleware
+from backend.workspaces.routes import router as workspace_router
 
 settings = Settings()
 configure_logging(settings.log_level)
@@ -18,7 +19,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[str(origin).rstrip("/") for origin in settings.cors_allowed_origins],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Content-Type"],
     expose_headers=["X-Request-ID"],
 )
@@ -30,3 +31,4 @@ def health():
 
 
 app.include_router(auth_router)
+app.include_router(workspace_router)
