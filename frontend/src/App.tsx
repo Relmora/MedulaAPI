@@ -1,10 +1,10 @@
 import { Navigate, Route, Routes, Link } from "react-router";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import AuthenticatedLayout from "@/layouts/authenticated-layout";
-import Login from "@/pages/login/login";
-import Workspaces from "@/pages/workspace/workspace";
-import WorkspaceDetail from "@/pages/workspace/workspace-detail";
-import KnowledgeBaseDetail from "@/pages/knowledge-base/knowledge-base";
+import Login from "@/pages/Login/login";
+import Workspaces from "@/pages/Workspace/workspace";
+import WorkspaceDetail from "@/pages/Workspace/workspace-detail";
+import KnowledgeBaseDetail from "@/pages/Knowledge-base/knowledge-base";
 
 export default function App() {
   return (
