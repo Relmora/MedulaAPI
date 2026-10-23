@@ -1,53 +1,37 @@
-import { useEffect, useState } from "react";
+import { Navigate, Route, Routes, Link } from "react-router";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import AuthenticatedLayout from "@/layouts/authenticated-layout";
+import Login from "@/pages/login/login";
+import Workspaces from "@/pages/workspace/workspace";
+import WorkspaceDetail from "@/pages/workspace/workspace-detail";
+import KnowledgeBaseDetail from "@/pages/knowledge-base/knowledge-base";
 
-type ConnectionStatus = "checking" | "connected" | "failed";
-
-function App() {
-  const [status, setStatus] = useState<ConnectionStatus>("checking");
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function checkBackend() {
-      try {
-        const response = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL}/health`,
-          { signal: controller.signal },
-        );
-
-        if (!response.ok) {
-          throw new Error("Health request failed");
-        }
-
-        const data = await response.json();
-
-        if (data.status !== "ok") {
-          throw new Error("Unexpected health response");
-        }
-
-        setStatus("connected");
-      } catch {
-        if (!controller.signal.aborted) {
-          setStatus("failed");
-        }
-      }
-    }
-
-    void checkBackend();
-
-    return () => controller.abort();
-  }, []);
-
+export default function App() {
   return (
-    <main>
-      <h1>MedulaAPI</h1>
-      <p role="status">
-        {status === "checking" && "Checking backend…"}
-        {status === "connected" && "Backend connected"}
-        {status === "failed" && "Could not connect to backend"}
-      </p>
-    </main>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route element={<AuthenticatedLayout />}>
+        <Route index element={<Navigate to="/workspaces" replace />} />
+        <Route path="/workspaces" element={<Workspaces />} />
+        <Route path="/workspaces/:workspaceId" element={<WorkspaceDetail />} />
+        <Route
+          path="/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId"
+          element={<KnowledgeBaseDetail />}
+        />
+        <Route
+          path="*"
+          element={
+            <Card>
+              <CardHeader>
+                <CardTitle>Page not found</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <Link to="/workspaces">Go to workspaces</Link>
+              </CardContent>
+            </Card>
+          }
+        />
+      </Route>
+    </Routes>
   );
 }
-
-export default App;

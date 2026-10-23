@@ -343,3 +343,40 @@ pending. No migration or frontend change is required.
 
 Manual check: login, call /me (200), logout with {}, then /me (401). For logout-all,
 log in from two browsers and confirm both are rejected after either logs out all.
+
+## Knowledge bases (issue #5 — backend)
+
+Knowledge bases belong to a workspace and inherit its owner. Authenticated users
+can create/list at `/workspaces/{workspace_id}/knowledge-bases`, and view/rename
+at `/workspaces/{workspace_id}/knowledge-bases/{knowledge_base_id}` using GET/PATCH.
+Create uses POST (201); other successful operations return 200. Writes accept
+only `{"name": "Product documentation"}`. Names are trimmed, required, and limited
+to 100 characters; duplicate names are allowed. Responses include UUID id,
+workspace_id, name, created_at, and updated_at.
+
+Lists return items, limit, offset, and total, ordered by created_at descending
+then id descending. Limit defaults to 20 (1–100); offset defaults to 0 (nonnegative).
+Every operation checks workspace ownership, and detail operations also check
+the knowledge base's workspace. Missing/inaccessible resources return 404;
+unauthenticated requests return 401. Writes reuse cookie origin protection.
+Successful writes commit before returning; the session context rolls back
+failed transactions when closing.
+
+The hand-authored migration `e5a1b2c3d4f6` follows `c0b80fd0cb36`. It adds the
+knowledge_bases table, workspace index, name checks, and a RESTRICT foreign key
+preventing deletion of a referenced workspace. No tables are created at startup.
+
+Per AGENTS.md, migration commands must be run by the developer, from backend/:
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic check
+```
+
+Before considering this issue complete, verify migration application against
+PostgreSQL on both an empty disposable database and one at the workspace revision.
+Confirm persisted create/rename behavior, timezone-aware timestamps, and rejection
+of workspace deletion while it contains a knowledge base. Unit/API tests use SQLite
+and do not establish PostgreSQL migration correctness. The frontend is implemented; frontend automated tests are deferred. Real PostgreSQL
+integration and remote CI verification remain pending; deletion, transfer, and document upload are out of scope.

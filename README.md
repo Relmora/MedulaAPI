@@ -2,7 +2,7 @@
 
 An independent knowledge-platform project under development.
 
-Currently implemented: React frontend, FastAPI health endpoint, environment-based CORS configuration, a PostgreSQL connection factory, and baseline quality checks. Authentication, projects/deployments, ingestion, knowledge graphs, retrieval, MCP, and Alembic migrations are not implemented yet.
+Currently implemented: a React/shadcn console, cookie-based authentication, owner-scoped workspaces and knowledge bases, FastAPI endpoints, and Alembic migrations. Users can create, browse, and rename workspaces and knowledge bases. Document ingestion, knowledge graphs, retrieval, and MCP remain future work. The knowledge-base migration and complete flow still need verification against PostgreSQL.
 
 ## Development stack
 
@@ -44,7 +44,7 @@ cd frontend
 npm run dev
 ```
 
-Open http://localhost:5173. The page should display **Backend connected**. API health is at http://127.0.0.1:8000/health and API documentation is at http://127.0.0.1:8000/docs. The health endpoint checks the API process, not PostgreSQL; use the backend guide's separate connection check to verify the database.
+Open http://localhost:5173 and sign in. Set the frontend API address to http://localhost:8000 so cookie authentication uses matching hostnames. API health is at http://127.0.0.1:8000/health and API documentation is at http://127.0.0.1:8000/docs. The health endpoint checks the API process, not PostgreSQL; use the backend guide's separate connection check to verify the database.
 
 ## Checks before pushing
 
