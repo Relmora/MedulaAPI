@@ -8,7 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { getWorkspace } from "@/services/workspace";
 import { getErrorMessage } from "@/services/http";
 import { WorkspaceForm } from "./components/workspace-form";
-import { KnowledgeBaseList } from "@/pages/Knowledge-base/components/knowledge-base-list";
+import { KnowledgeBaseList } from "@/pages/knowledge-base/components/knowledge-base-list";
 
 export default function WorkspaceDetail() {
   const { workspaceId = "" } = useParams();
