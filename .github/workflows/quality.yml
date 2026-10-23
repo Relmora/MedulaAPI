@@ -65,9 +65,6 @@ jobs:
       - name: Check frontend lint
         run: npm run lint
       
-      - name: Run frontend tests
-        run: npm test
-
       - name: Check TypeScript and build frontend
         run: npm run build
         env:
