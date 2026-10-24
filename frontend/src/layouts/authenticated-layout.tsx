@@ -1,41 +1,38 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Separator } from "@/components/ui/separator";
 import { getCurrentUser, logout, sessionKey } from "@/services/auth";
 import { getErrorMessage } from "@/services/http";
+import { AppSidebar } from "./components/app-sidebar";
+import { MobileHeader } from "./components/mobile-header";
 
 export default function AuthenticatedLayout() {
-  const queryClient = useQueryClient();
   const location = useLocation();
   const navigate = useNavigate();
+
   const session = useQuery({
     queryKey: sessionKey,
     queryFn: ({ signal }) => getCurrentUser(signal),
   });
+
   const signOut = useMutation({
     mutationFn: logout,
-    onSuccess: async () => {
-      await queryClient.cancelQueries();
-      queryClient.removeQueries({
-        predicate: (query) => query.queryKey[0] !== "session",
-      });
-      queryClient.setQueryData(sessionKey, null);
+    onSuccess: () => {
       navigate("/login", { replace: true });
     },
   });
-  if (session.isPending)
+
+  if (session.isPending) {
     return (
       <main className="p-6">
         <Skeleton className="h-24" aria-label="Checking session" />
       </main>
     );
-  if (!session.isError && !session.data)
-    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
-  if (session.isError)
+  }
+
+  if (session.isError) {
     return (
       <main className="p-6">
         <Alert variant="destructive">
@@ -46,34 +43,37 @@ export default function AuthenticatedLayout() {
         </Alert>
       </main>
     );
+  }
+
+  if (!session.data) {
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+  }
+
+  const handleSignOut = () => signOut.mutate();
+
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-4 md:p-6">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4">
-          <CardTitle>
-            <Link to="/workspaces">MedulaAPI</Link>
-          </CardTitle>
-          <Button
-            variant="outline"
-            disabled={signOut.isPending}
-            onClick={() => signOut.mutate()}
-          >
-            {signOut.isPending ? "Signing out…" : "Sign out"}
-          </Button>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Signed in as {session.data?.username}
-          </p>
-        </CardContent>
-      </Card>
-      {signOut.isError && (
-        <Alert variant="destructive">
-          <AlertDescription>{getErrorMessage(signOut.error)}</AlertDescription>
-        </Alert>
-      )}
-      <Separator />
-      <Outlet />
-    </main>
+    <div className="min-h-svh bg-stone-50 lg:grid lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <AppSidebar
+        username={session.data.username}
+        isSigningOut={signOut.isPending}
+        onSignOut={handleSignOut}
+      />
+      <div className="min-w-0">
+        <MobileHeader
+          isSigningOut={signOut.isPending}
+          onSignOut={handleSignOut}
+        />
+        <main className="mx-auto w-full max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
+          {signOut.isError && (
+            <Alert variant="destructive" className="mb-6">
+              <AlertDescription>
+                {getErrorMessage(signOut.error)}
+              </AlertDescription>
+            </Alert>
+          )}
+          <Outlet />
+        </main>
+      </div>
+    </div>
   );
 }
