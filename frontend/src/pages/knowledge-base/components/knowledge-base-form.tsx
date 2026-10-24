@@ -1,36 +1,27 @@
 import { useId, useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  createKnowledgeBase,
-  renameKnowledgeBase,
-  type KnowledgeBase,
-} from "@/services/knowledge-base";
 import { getErrorMessage } from "@/services/http";
+import {
+  saveKnowledgeBase,
+  type KnowledgeBaseFormProps,
+} from "../utils/utils";
 
 export function KnowledgeBaseForm({
   workspaceId,
   knowledgeBase,
   onSaved,
   onCancel,
-}: {
-  workspaceId: string;
-  knowledgeBase?: KnowledgeBase;
-  onSaved: (knowledgeBase: KnowledgeBase) => void;
-  onCancel: () => void;
-}) {
+}: KnowledgeBaseFormProps) {
   const id = useId();
   const queryClient = useQueryClient();
   const [name, setName] = useState(knowledgeBase?.name ?? "");
-  const [validation, setValidation] = useState("");
   const mutation = useMutation({
-    mutationFn: (name: string) =>
-      knowledgeBase
-        ? renameKnowledgeBase(workspaceId, knowledgeBase.id, name)
-        : createKnowledgeBase(workspaceId, name),
+    mutationFn: (value: string) =>
+      saveKnowledgeBase(workspaceId, value, knowledgeBase),
     onSuccess: (result) => {
       queryClient.setQueryData(
         ["knowledge-base", workspaceId, result.id],
@@ -42,49 +33,51 @@ export function KnowledgeBaseForm({
       onSaved(result);
     },
   });
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (mutation.isPending) return;
-    const value = name.trim();
-    if (!value || [...value].length > 100) {
-      setValidation("Enter a name between 1 and 100 characters.");
-      return;
-    }
-    setValidation("");
-    mutation.mutate(value);
+    mutation.mutate(name);
   }
+
   return (
-    <form onSubmit={submit} className="space-y-4">
-      <Label htmlFor={id}>Knowledge base name</Label>
-      <Input
-        id={id}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        disabled={mutation.isPending}
-        aria-invalid={!!validation}
-      />
-      {(validation || mutation.isError) && (
+    <form onSubmit={submit} className="space-y-5">
+      <div className="space-y-2">
+        <Label htmlFor={id} className="font-normal text-stone-700">
+          Knowledge base name
+        </Label>
+        <Input
+          id={id}
+          autoFocus
+          placeholder="e.g. Engineering handbook"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={mutation.isPending}
+          aria-invalid={mutation.isError}
+          className="h-11 rounded-xl border-stone-200 bg-stone-50/70"
+        />
+      </div>
+      {mutation.isError && (
         <Alert variant="destructive">
-          <AlertDescription>
-            {validation || getErrorMessage(mutation.error)}
-          </AlertDescription>
+          <AlertDescription>{getErrorMessage(mutation.error)}</AlertDescription>
         </Alert>
       )}
-      <Button type="submit" disabled={mutation.isPending}>
-        {mutation.isPending
-          ? "Saving…"
-          : knowledgeBase
-            ? "Save name"
-            : "Create knowledge base"}
-      </Button>{" "}
-      <Button
-        type="button"
-        variant="outline"
-        disabled={mutation.isPending}
-        onClick={onCancel}
-      >
-        Cancel
-      </Button>
+      <div className="flex justify-end gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          disabled={mutation.isPending}
+          onClick={onCancel}
+        >
+          Cancel
+        </Button>
+        <Button type="submit" disabled={mutation.isPending}>
+          {mutation.isPending
+            ? "Saving…"
+            : knowledgeBase
+              ? "Save name"
+              : "Create knowledge base"}
+        </Button>
+      </div>
     </form>
   );
 }
