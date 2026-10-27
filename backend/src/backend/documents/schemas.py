@@ -1,7 +1,7 @@
 """Validated values used by the document upload-intent API."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
@@ -51,7 +51,7 @@ class UploadInstructionsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
-    method: str
+    method: Literal["PUT", "POST"]
     headers: dict[str, str]
     form_fields: dict[str, str] | None
     expires_at: datetime
