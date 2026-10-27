@@ -11,6 +11,7 @@ from backend.documents.schemas import DocumentUploadIntentCreate
 from backend.documents.service import create_pending_document, get_document
 from backend.errors import AppError
 from backend.models import Document, User
+from backend.object_storage.fake import FakeObjectStorage
 
 
 def hierarchy(client) -> tuple[UUID, UUID]:
@@ -41,16 +42,27 @@ def test_create_pending_document_persists_upload_intent(clients):
     with Session(engine) as db:
         alice, _ = users(db)
         alice_id = alice.id
-        document = create_pending_document(
+        storage = FakeObjectStorage(provider="gcs", bucket="documents-test")
+        pending = create_pending_document(
             db,
             alice,
             workspace_id,
             knowledge_base_id,
             payload(),
+            storage=storage,
             now=now,
         )
+        document = pending.document
         db.commit()
         document_id = document.id
+
+        assert pending.upload.method == "PUT"
+        assert pending.upload.expires_at == now + timedelta(minutes=15)
+        assert pending.upload.headers == {
+            "Content-Type": "application/pdf",
+            "X-Expected-Size": "1024",
+        }
+        assert storage.upload_requests[0].object_key == document.storage_object_key
 
     with Session(engine) as db:
         saved = db.get(Document, document_id)
@@ -60,14 +72,19 @@ def test_create_pending_document_persists_upload_intent(clients):
         assert saved.original_filename == "notes.pdf"
         assert saved.declared_content_type == "application/pdf"
         assert saved.declared_size_bytes == 1024
-        assert saved.gcs_object_key == f"documents/{document_id}/original"
+        assert saved.storage_provider == "gcs"
+        assert saved.storage_bucket == "documents-test"
+        assert saved.storage_object_key == f"documents/{document_id}/original"
         assert saved.upload_status == "PENDING"
         assert saved.processing_status == "NOT_QUEUED"
-        assert saved.upload_expires_at.replace(tzinfo=UTC) == now + timedelta(minutes=15)
+        assert saved.upload_expires_at.replace(tzinfo=UTC) == now + timedelta(
+            minutes=15
+        )
         assert saved.detected_content_type is None
         assert saved.stored_size_bytes is None
-        assert saved.gcs_generation is None
-        assert saved.gcs_crc32c is None
+        assert saved.storage_version is None
+        assert saved.storage_checksum is None
+        assert saved.storage_checksum_algorithm is None
         assert saved.uploaded_at is None
 
 
@@ -77,14 +94,25 @@ def test_generated_object_keys_are_unique(clients):
 
     with Session(engine) as db:
         alice, _ = users(db)
+        storage = FakeObjectStorage()
         first = create_pending_document(
-            db, alice, workspace_id, knowledge_base_id, payload("first.pdf")
-        )
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload("first.pdf"),
+            storage=storage,
+        ).document
         second = create_pending_document(
-            db, alice, workspace_id, knowledge_base_id, payload("second.pdf")
-        )
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload("second.pdf"),
+            storage=storage,
+        ).document
         assert first.id != second.id
-        assert first.gcs_object_key != second.gcs_object_key
+        assert first.storage_object_key != second.storage_object_key
 
 
 def test_create_and_get_are_owner_scoped(clients):
@@ -93,22 +121,29 @@ def test_create_and_get_are_owner_scoped(clients):
 
     with Session(engine) as db:
         alice, bob = users(db)
+        storage = FakeObjectStorage()
         document = create_pending_document(
-            db, alice, workspace_id, knowledge_base_id, payload()
-        )
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload(),
+            storage=storage,
+        ).document
         assert (
-            get_document(
-                db, alice, workspace_id, knowledge_base_id, document.id
-            ).id
+            get_document(db, alice, workspace_id, knowledge_base_id, document.id).id
             == document.id
         )
         for operation in (
             lambda: create_pending_document(
-                db, bob, workspace_id, knowledge_base_id, payload()
+                db,
+                bob,
+                workspace_id,
+                knowledge_base_id,
+                payload(),
+                storage=storage,
             ),
-            lambda: get_document(
-                db, bob, workspace_id, knowledge_base_id, document.id
-            ),
+            lambda: get_document(db, bob, workspace_id, knowledge_base_id, document.id),
         ):
             with pytest.raises(AppError) as error:
                 operation()
@@ -128,8 +163,13 @@ def test_document_must_belong_to_requested_knowledge_base(clients):
     with Session(engine) as db:
         alice, _ = users(db)
         document = create_pending_document(
-            db, alice, workspace_id, knowledge_base_id, payload()
-        )
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload(),
+            storage=FakeObjectStorage(),
+        ).document
         with pytest.raises(AppError) as error:
             get_document(
                 db,
@@ -146,11 +186,32 @@ def test_document_must_belong_to_requested_knowledge_base(clients):
     "invalid_payload",
     [
         {},
-        {"original_filename": "", "declared_content_type": "application/pdf", "declared_size_bytes": 1},
-        {"original_filename": "../notes.pdf", "declared_content_type": "application/pdf", "declared_size_bytes": 1},
-        {"original_filename": "notes.exe", "declared_content_type": "application/octet-stream", "declared_size_bytes": 1},
-        {"original_filename": "notes.pdf", "declared_content_type": "application/pdf", "declared_size_bytes": 0},
-        {"original_filename": "notes.pdf", "declared_content_type": "application/pdf", "declared_size_bytes": 1, "gcs_object_key": "chosen/by/client"},
+        {
+            "original_filename": "",
+            "declared_content_type": "application/pdf",
+            "declared_size_bytes": 1,
+        },
+        {
+            "original_filename": "../notes.pdf",
+            "declared_content_type": "application/pdf",
+            "declared_size_bytes": 1,
+        },
+        {
+            "original_filename": "notes.exe",
+            "declared_content_type": "application/octet-stream",
+            "declared_size_bytes": 1,
+        },
+        {
+            "original_filename": "notes.pdf",
+            "declared_content_type": "application/pdf",
+            "declared_size_bytes": 0,
+        },
+        {
+            "original_filename": "notes.pdf",
+            "declared_content_type": "application/pdf",
+            "declared_size_bytes": 1,
+            "storage_object_key": "chosen/by/client",
+        },
     ],
 )
 def test_upload_intent_rejects_untrusted_metadata(invalid_payload):
@@ -180,6 +241,7 @@ def test_internal_time_arguments_must_be_valid(clients):
                 workspace_id,
                 knowledge_base_id,
                 payload(),
+                storage=FakeObjectStorage(),
                 now=datetime(2026, 10, 27),
             )
         with pytest.raises(ValueError, match="positive"):
@@ -189,6 +251,7 @@ def test_internal_time_arguments_must_be_valid(clients):
                 workspace_id,
                 knowledge_base_id,
                 payload(),
+                storage=FakeObjectStorage(),
                 upload_ttl=timedelta(0),
             )
 

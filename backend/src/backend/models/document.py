@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -37,8 +38,16 @@ class Document(Base):
             name="ck_documents_stored_size_positive",
         ),
         CheckConstraint(
-            "length(gcs_object_key) > 0",
-            name="ck_documents_gcs_object_key_nonempty",
+            "length(storage_provider) > 0",
+            name="ck_documents_storage_provider_nonempty",
+        ),
+        CheckConstraint(
+            "length(storage_bucket) > 0",
+            name="ck_documents_storage_bucket_nonempty",
+        ),
+        CheckConstraint(
+            "length(storage_object_key) > 0",
+            name="ck_documents_storage_object_key_nonempty",
         ),
         CheckConstraint(
             "upload_status IN ('PENDING', 'STORED', 'EXPIRED', 'DELETED')",
@@ -55,6 +64,12 @@ class Document(Base):
             "upload_status",
             "upload_expires_at",
         ),
+        UniqueConstraint(
+            "storage_provider",
+            "storage_bucket",
+            "storage_object_key",
+            name="uq_documents_storage_location",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -66,12 +81,19 @@ class Document(Base):
     )
     original_filename: Mapped[str] = mapped_column(String(255))
     declared_content_type: Mapped[str] = mapped_column(String(127))
-    detected_content_type: Mapped[str | None] = mapped_column(String(127), nullable=True)
+    detected_content_type: Mapped[str | None] = mapped_column(
+        String(127), nullable=True
+    )
     declared_size_bytes: Mapped[int] = mapped_column(BigInteger)
     stored_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    gcs_object_key: Mapped[str] = mapped_column(String(1024), unique=True)
-    gcs_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    gcs_crc32c: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    storage_provider: Mapped[str] = mapped_column(String(32))
+    storage_bucket: Mapped[str] = mapped_column(String(255))
+    storage_object_key: Mapped[str] = mapped_column(String(1024))
+    storage_version: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    storage_checksum: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    storage_checksum_algorithm: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
     upload_status: Mapped[str] = mapped_column(
         String(32), default="PENDING", server_default="PENDING"
     )
