@@ -75,9 +75,7 @@ def test_gcs_maps_missing_object_and_delete_is_idempotent():
     "object_key,content_type,size_bytes",
     [("", "application/pdf", 1), ("key", "", 1), ("key", "text/plain", 0)],
 )
-def test_gcs_rejects_invalid_upload_grant_inputs(
-    object_key, content_type, size_bytes
-):
+def test_gcs_rejects_invalid_upload_grant_inputs(object_key, content_type, size_bytes):
     storage, _, _, _ = make_storage()
     with pytest.raises(ValueError):
         storage.create_upload_grant(

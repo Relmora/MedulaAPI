@@ -355,9 +355,7 @@ def test_complete_document_rejects_missing_object(clients):
     "size_bytes,content_type",
     [(1025, "application/pdf"), (1024, "text/plain")],
 )
-def test_complete_document_rejects_metadata_mismatch(
-    clients, size_bytes, content_type
-):
+def test_complete_document_rejects_metadata_mismatch(clients, size_bytes, content_type):
     alice_client, _, engine = clients
     workspace_id, knowledge_base_id = hierarchy(alice_client)
     with Session(engine) as db:

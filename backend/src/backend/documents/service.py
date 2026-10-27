@@ -106,9 +106,7 @@ def complete_document_upload(
 ) -> Document:
     """Verify the private object and mark its upload as stored."""
 
-    document = get_document(
-        db, user, workspace_id, knowledge_base_id, document_id
-    )
+    document = get_document(db, user, workspace_id, knowledge_base_id, document_id)
     if document.upload_status == "STORED":
         return document
     if document.upload_status != "PENDING":

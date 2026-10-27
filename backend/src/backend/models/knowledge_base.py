@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.models.base import Base
 
-#  there should be changes 
+
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
     __table_args__ = (

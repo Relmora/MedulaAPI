@@ -17,10 +17,7 @@ def document_collection(client):
     knowledge_base_id = client.post(
         collection(workspace_id), json={"name": "Documents"}
     ).json()["id"]
-    return (
-        f"/workspaces/{workspace_id}/knowledge-bases/"
-        f"{knowledge_base_id}/documents"
-    )
+    return f"/workspaces/{workspace_id}/knowledge-bases/{knowledge_base_id}/documents"
 
 
 def valid_payload():
