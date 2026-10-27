@@ -19,6 +19,10 @@ class Settings(BaseSettings):
 
     registration_enabled: bool = False
 
+    storage_provider: Literal["gcs"] = "gcs"
+    storage_bucket: str = ""
+    gcp_project_id: str | None = None
+
     db_host: str = "::1"
     db_port: int = 5432
     db_name: str = "MedullaAPI"

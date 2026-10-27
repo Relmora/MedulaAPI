@@ -31,6 +31,11 @@ export function getErrorMessage(error: unknown): string {
   const messages: Record<string, string> = {
     INVALID_CREDENTIALS: "The username or password is incorrect.",
     REGISTRATION_DISABLED: "Registration is currently closed.",
+    DOCUMENT_UPLOAD_INCOMPLETE:
+      "Storage could not find the uploaded file. Select it and try again.",
+    DOCUMENT_UPLOAD_MISMATCH:
+      "The stored file did not match the selected file. Please try again.",
+    DOCUMENT_UPLOAD_STATE: "This upload cannot be completed again.",
     USERNAME_UNAVAILABLE: "That username is unavailable.",
     UNTRUSTED_ORIGIN:
       "The API rejected this browser origin. Check that both URLs use the same hostname and the frontend origin is allowed.",

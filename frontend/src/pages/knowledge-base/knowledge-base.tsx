@@ -13,6 +13,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getKnowledgeBase } from "@/services/knowledge-base";
 import { getErrorMessage } from "@/services/http";
+import { DocumentUpload } from "./components/document-upload";
 import { KnowledgeBaseForm } from "./components/knowledge-base-form";
 
 export default function KnowledgeBaseDetail() {
@@ -99,9 +100,10 @@ function KnowledgeBaseContent({
             <p className="text-sm">
               Updated: {new Date(query.data.updated_at).toLocaleString()}
             </p>
-            <CardDescription>
-              Document uploads will be available in a future update.
-            </CardDescription>
+            <DocumentUpload
+              workspaceId={workspaceId}
+              knowledgeBaseId={knowledgeBaseId}
+            />
           </CardContent>
         </Card>
       )}
