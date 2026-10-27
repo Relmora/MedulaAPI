@@ -92,3 +92,71 @@ def get_document(
     if document is None:
         raise AppError("DOCUMENT_NOT_FOUND", "Document not found.", 404)
     return document
+
+
+def complete_document_upload(
+    db: Session,
+    user: User,
+    workspace_id: UUID,
+    knowledge_base_id: UUID,
+    document_id: UUID,
+    *,
+    storage: ObjectStorage,
+    now: datetime | None = None,
+) -> Document:
+    """Verify the private object and mark its upload as stored."""
+
+    document = get_document(
+        db, user, workspace_id, knowledge_base_id, document_id
+    )
+    if document.upload_status == "STORED":
+        return document
+    if document.upload_status != "PENDING":
+        raise AppError(
+            "DOCUMENT_UPLOAD_STATE",
+            "Document is not awaiting an upload.",
+            409,
+        )
+    if (
+        document.storage_provider != storage.provider
+        or document.storage_bucket != storage.bucket
+    ):
+        raise AppError(
+            "STORAGE_CONFIGURATION_MISMATCH",
+            "Document storage is temporarily unavailable.",
+            503,
+        )
+
+    completed_at = now or datetime.now(UTC)
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+
+    try:
+        metadata = storage.get_object_metadata(document.storage_object_key)
+    except FileNotFoundError as exc:
+        raise AppError(
+            "DOCUMENT_UPLOAD_INCOMPLETE",
+            "Uploaded object was not found.",
+            409,
+        ) from exc
+
+    if (
+        metadata.size_bytes != document.declared_size_bytes
+        or metadata.content_type != document.declared_content_type
+    ):
+        raise AppError(
+            "DOCUMENT_UPLOAD_MISMATCH",
+            "Uploaded object does not match the upload intent.",
+            409,
+        )
+
+    document.stored_size_bytes = metadata.size_bytes
+    document.storage_version = metadata.version
+    document.storage_checksum = metadata.checksum
+    document.storage_checksum_algorithm = metadata.checksum_algorithm
+    document.upload_status = "STORED"
+    document.uploaded_at = completed_at
+    document.failure_code = None
+    db.flush()
+    db.refresh(document)
+    return document

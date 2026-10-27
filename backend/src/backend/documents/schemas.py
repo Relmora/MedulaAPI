@@ -62,3 +62,19 @@ class DocumentUploadIntentResponse(BaseModel):
 
     document_id: UUID
     upload: UploadInstructionsResponse
+
+
+class DocumentUploadCompleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: UUID
+    upload_status: Literal["STORED"]
+    stored_size_bytes: int = Field(gt=0)
+    storage_version: str | None
+    storage_checksum: str | None
+    storage_checksum_algorithm: str | None
+    uploaded_at: datetime
+
+
+class DocumentUploadCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")

@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_knowledge_base_routes import collection, workspace
@@ -7,6 +9,7 @@ from backend.main import app
 from backend.models import Document
 from backend.object_storage.dependencies import get_object_storage
 from backend.object_storage.fake import FakeObjectStorage
+from backend.object_storage.schemas import StoredObjectMetadata
 
 
 def document_collection(client):
@@ -84,5 +87,70 @@ def test_upload_intent_rejects_unsupported_or_oversized_files(clients):
         oversized = valid_payload() | {"declared_size_bytes": 25 * 1024 * 1024 + 1}
         assert alice.post(path, json=unsupported).status_code == 422
         assert alice.post(path, json=oversized).status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+
+def test_complete_upload_verifies_object_and_is_idempotent(clients):
+    alice, _, engine = clients
+    storage = FakeObjectStorage(provider="gcs", bucket="documents-test")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        path = document_collection(alice)
+        intent = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
+        with Session(engine) as db:
+            document = db.get(Document, UUID(intent["document_id"]))
+            object_key = document.storage_object_key
+        storage.objects[object_key] = StoredObjectMetadata(
+            size_bytes=42,
+            content_type="application/pdf",
+            version="generation-1",
+            checksum="checksum",
+            checksum_algorithm="crc32c",
+        )
+
+        target = f"{path}/{intent['document_id']}/complete"
+        response = alice.post(target, json={})
+        retried = alice.post(target, json={})
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    assert retried.status_code == 200
+    assert response.json() == retried.json()
+    assert response.json()["upload_status"] == "STORED"
+    assert response.json()["stored_size_bytes"] == 42
+    assert response.headers["cache-control"] == "no-store"
+    with Session(engine) as db:
+        document = db.get(Document, UUID(intent["document_id"]))
+        assert document.upload_status == "STORED"
+        assert document.storage_version == "generation-1"
+        assert document.processing_status == "NOT_QUEUED"
+
+
+def test_complete_upload_enforces_ownership_and_origin(clients):
+    alice, bob, engine = clients
+    storage = FakeObjectStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        path = document_collection(alice)
+        intent = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
+        with Session(engine) as db:
+            document = db.get(Document, UUID(intent["document_id"]))
+            object_key = document.storage_object_key
+        storage.objects[object_key] = StoredObjectMetadata(
+            size_bytes=42,
+            content_type="application/pdf",
+        )
+        target = f"{path}/{intent['document_id']}/complete"
+        assert bob.post(target, json={}).status_code == 404
+        assert (
+            alice.post(
+                target,
+                json={},
+                headers={"Origin": "https://attacker.example"},
+            ).status_code
+            == 403
+        )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)

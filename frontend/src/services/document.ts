@@ -15,6 +15,16 @@ export type DocumentUploadIntent = {
   upload: UploadInstructions;
 };
 
+export type StoredDocument = {
+  document_id: string;
+  upload_status: "STORED";
+  stored_size_bytes: number;
+  storage_version: string | null;
+  storage_checksum: string | null;
+  storage_checksum_algorithm: string | null;
+  uploaded_at: string;
+};
+
 function documentsPath(workspaceId: string, knowledgeBaseId: string) {
   return (
     `/workspaces/${workspaceId}/knowledge-bases/` +
@@ -61,7 +71,7 @@ export async function uploadDocument(
   workspaceId: string,
   knowledgeBaseId: string,
   file: File,
-): Promise<DocumentUploadIntent> {
+): Promise<StoredDocument> {
   const intent = await createDocumentUploadIntent(
     workspaceId,
     knowledgeBaseId,
@@ -76,5 +86,11 @@ export async function uploadDocument(
     throw new Error(
       "Storage rejected the upload. Select the file and try again.",
     );
-  return intent;
+  return (
+    await http.post<StoredDocument>(
+      `${documentsPath(workspaceId, knowledgeBaseId)}/` +
+        `${intent.document_id}/complete`,
+      {},
+    )
+  ).data;
 }

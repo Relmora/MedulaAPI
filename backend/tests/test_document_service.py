@@ -8,10 +8,15 @@ from sqlalchemy.orm import Session
 from test_workspace_routes import clients as clients
 
 from backend.documents.schemas import DocumentUploadIntentCreate
-from backend.documents.service import create_pending_document, get_document
+from backend.documents.service import (
+    complete_document_upload,
+    create_pending_document,
+    get_document,
+)
 from backend.errors import AppError
 from backend.models import Document, User
 from backend.object_storage.fake import FakeObjectStorage
+from backend.object_storage.schemas import StoredObjectMetadata
 
 
 def hierarchy(client) -> tuple[UUID, UUID]:
@@ -265,3 +270,119 @@ def test_missing_document_returns_safe_not_found(clients):
             get_document(db, alice, workspace_id, knowledge_base_id, uuid4())
         assert error.value.code == "DOCUMENT_NOT_FOUND"
         assert error.value.message == "Document not found."
+
+
+def test_complete_document_verifies_and_persists_storage_metadata(clients):
+    alice_client, _, engine = clients
+    workspace_id, knowledge_base_id = hierarchy(alice_client)
+    completed_at = datetime(2026, 10, 27, 13, 0, tzinfo=UTC)
+    with Session(engine) as db:
+        alice, _ = users(db)
+        storage = FakeObjectStorage(provider="gcs", bucket="documents-test")
+        document = create_pending_document(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload(),
+            storage=storage,
+        ).document
+        storage.objects[document.storage_object_key] = StoredObjectMetadata(
+            size_bytes=1024,
+            content_type="application/pdf",
+            version="123",
+            checksum="checksum",
+            checksum_algorithm="crc32c",
+        )
+
+        completed = complete_document_upload(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            document.id,
+            storage=storage,
+            now=completed_at,
+        )
+        first_uploaded_at = completed.uploaded_at
+        retried = complete_document_upload(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            document.id,
+            storage=storage,
+            now=completed_at + timedelta(minutes=1),
+        )
+
+        assert retried.upload_status == "STORED"
+        assert retried.stored_size_bytes == 1024
+        assert retried.storage_version == "123"
+        assert retried.storage_checksum == "checksum"
+        assert retried.storage_checksum_algorithm == "crc32c"
+        assert retried.uploaded_at == first_uploaded_at
+        assert retried.processing_status == "NOT_QUEUED"
+
+
+def test_complete_document_rejects_missing_object(clients):
+    alice_client, _, engine = clients
+    workspace_id, knowledge_base_id = hierarchy(alice_client)
+    with Session(engine) as db:
+        alice, _ = users(db)
+        storage = FakeObjectStorage()
+        document = create_pending_document(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload(),
+            storage=storage,
+        ).document
+        with pytest.raises(AppError) as error:
+            complete_document_upload(
+                db,
+                alice,
+                workspace_id,
+                knowledge_base_id,
+                document.id,
+                storage=storage,
+            )
+        assert error.value.code == "DOCUMENT_UPLOAD_INCOMPLETE"
+        assert document.upload_status == "PENDING"
+
+
+@pytest.mark.parametrize(
+    "size_bytes,content_type",
+    [(1025, "application/pdf"), (1024, "text/plain")],
+)
+def test_complete_document_rejects_metadata_mismatch(
+    clients, size_bytes, content_type
+):
+    alice_client, _, engine = clients
+    workspace_id, knowledge_base_id = hierarchy(alice_client)
+    with Session(engine) as db:
+        alice, _ = users(db)
+        storage = FakeObjectStorage()
+        document = create_pending_document(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            payload(),
+            storage=storage,
+        ).document
+        storage.objects[document.storage_object_key] = StoredObjectMetadata(
+            size_bytes=size_bytes,
+            content_type=content_type,
+        )
+        with pytest.raises(AppError) as error:
+            complete_document_upload(
+                db,
+                alice,
+                workspace_id,
+                knowledge_base_id,
+                document.id,
+                storage=storage,
+            )
+        assert error.value.code == "DOCUMENT_UPLOAD_MISMATCH"
+        assert document.upload_status == "PENDING"

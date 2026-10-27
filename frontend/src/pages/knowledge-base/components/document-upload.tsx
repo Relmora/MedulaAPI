@@ -59,7 +59,7 @@ export function DocumentUpload({
       {mutation.isSuccess && (
         <Alert role="status">
           <AlertDescription>
-            Upload finished. Document ID: {mutation.data.document_id}
+            Upload verified and stored. Document ID: {mutation.data.document_id}
           </AlertDescription>
         </Alert>
       )}
