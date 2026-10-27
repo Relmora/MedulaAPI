@@ -1,12 +1,15 @@
-"""Validated client metadata used to create a document upload intent."""
+"""Validated values used by the document upload-intent API."""
 
+from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 ALLOWED_DECLARED_CONTENT_TYPES = frozenset(
     {"application/pdf", "text/markdown", "text/plain"}
 )
+MAX_DOCUMENT_SIZE_BYTES = 25 * 1024 * 1024
 
 OriginalFilename = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
@@ -27,7 +30,7 @@ class DocumentUploadIntentCreate(BaseModel):
 
     original_filename: OriginalFilename
     declared_content_type: DeclaredContentType
-    declared_size_bytes: int = Field(gt=0)
+    declared_size_bytes: int = Field(gt=0, le=MAX_DOCUMENT_SIZE_BYTES)
 
     @field_validator("original_filename")
     @classmethod
@@ -42,3 +45,20 @@ class DocumentUploadIntentCreate(BaseModel):
         if value not in ALLOWED_DECLARED_CONTENT_TYPES:
             raise ValueError("declared_content_type is not supported")
         return value
+
+
+class UploadInstructionsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    method: str
+    headers: dict[str, str]
+    form_fields: dict[str, str] | None
+    expires_at: datetime
+
+
+class DocumentUploadIntentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: UUID
+    upload: UploadInstructionsResponse

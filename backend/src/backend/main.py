@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.auth.routes import router as auth_router
 from backend.config import Settings
+from backend.documents.routes import router as document_router
 from backend.errors import install_error_handlers
 from backend.knowledge_bases.routes import router as knowledge_base_router
 from backend.logging import configure_logging
@@ -35,3 +36,4 @@ app.include_router(auth_router)
 app.include_router(workspace_router)
 
 app.include_router(knowledge_base_router)
+app.include_router(document_router)
