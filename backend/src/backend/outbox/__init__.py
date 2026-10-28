@@ -6,10 +6,16 @@ from backend.outbox.publisher import (
     OutboxPublisher,
     PublishBatchResult,
 )
+from backend.outbox.rabbitmq import (
+    RabbitMQConfirmingTransport,
+    RabbitMQPublishError,
+)
 
 __all__ = [
     "ConfirmingEventTransport",
     "OutboxMessage",
     "OutboxPublisher",
     "PublishBatchResult",
+    "RabbitMQConfirmingTransport",
+    "RabbitMQPublishError",
 ]

@@ -36,7 +36,7 @@ def outbox_database():
 
 def add_event(factory, *, available_at: datetime, **values) -> OutboxEvent:
     event = OutboxEvent(
-        event_type="INGESTION_JOB_REQUESTED",
+        event_type="document.ingestion.requested",
         aggregate_type="INGESTION_JOB",
         aggregate_id=uuid4(),
         schema_version=1,

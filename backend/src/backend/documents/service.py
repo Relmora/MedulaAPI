@@ -201,7 +201,7 @@ def complete_document_upload(
         db.flush()
         db.add(
             OutboxEvent(
-                event_type="INGESTION_JOB_REQUESTED",
+                event_type="document.ingestion.requested",
                 aggregate_type="INGESTION_JOB",
                 aggregate_id=job.id,
                 schema_version=1,

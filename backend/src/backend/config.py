@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     auth_signing_key: SecretStr = SecretStr("")
     auth_cookie_secure: bool = True
+    auth_allowed_origins: list[AnyHttpUrl] = [
+        AnyHttpUrl("http://localhost:5173"),
+        AnyHttpUrl("http://localhost:8000"),
+        AnyHttpUrl("http://127.0.0.1:8000"),
+    ]
 
     registration_enabled: bool = False
 

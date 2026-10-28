@@ -333,7 +333,7 @@ def test_complete_document_verifies_and_persists_storage_metadata(clients):
         events = db.scalars(select(OutboxEvent)).all()
         assert len(events) == 1
         assert events[0].aggregate_id == job_id
-        assert events[0].event_type == "INGESTION_JOB_REQUESTED"
+        assert events[0].event_type == "document.ingestion.requested"
         assert events[0].payload == {
             "job_id": str(job_id),
             "document_id": str(completed.id),
