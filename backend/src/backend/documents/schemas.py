@@ -23,6 +23,9 @@ DeclaredContentType = Annotated[
         max_length=127,
     ),
 ]
+DocumentProcessingStatus = Literal[
+    "QUEUED", "PROCESSING", "READY", "REJECTED", "FAILED"
+]
 
 
 class DocumentUploadIntentCreate(BaseModel):
@@ -68,7 +71,9 @@ class DocumentUploadCompleteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document_id: UUID
+    job_id: UUID
     upload_status: Literal["STORED"]
+    processing_status: DocumentProcessingStatus
     stored_size_bytes: int = Field(gt=0)
     storage_version: str | None
     storage_checksum: str | None

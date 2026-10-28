@@ -6,7 +6,7 @@ from test_knowledge_base_routes import collection, workspace
 from test_workspace_routes import clients as clients
 
 from backend.main import app
-from backend.models import Document
+from backend.models import Document, IngestionJob, OutboxEvent
 from backend.object_storage.dependencies import get_object_storage
 from backend.object_storage.fake import FakeObjectStorage
 from backend.object_storage.schemas import StoredObjectMetadata
@@ -116,13 +116,32 @@ def test_complete_upload_verifies_object_and_is_idempotent(clients):
     assert retried.status_code == 200
     assert response.json() == retried.json()
     assert response.json()["upload_status"] == "STORED"
+    assert response.json()["processing_status"] == "QUEUED"
     assert response.json()["stored_size_bytes"] == 42
     assert response.headers["cache-control"] == "no-store"
     with Session(engine) as db:
         document = db.get(Document, UUID(intent["document_id"]))
         assert document.upload_status == "STORED"
         assert document.storage_version == "generation-1"
-        assert document.processing_status == "NOT_QUEUED"
+        assert document.processing_status == "QUEUED"
+        job = db.scalar(select(IngestionJob))
+        assert job is not None
+        assert str(job.id) == response.json()["job_id"]
+        assert job.document_id == document.id
+        assert job.purpose == "INITIAL_INGESTION"
+        assert job.pipeline_version == "v1"
+        assert job.source_storage_version == "generation-1"
+        assert job.status == "QUEUED"
+        assert job.attempt_count == 0
+        assert job.max_attempts == 3
+        assert db.scalars(select(IngestionJob)).all() == [job]
+        event = db.scalar(select(OutboxEvent))
+        assert event is not None
+        assert event.aggregate_type == "INGESTION_JOB"
+        assert event.aggregate_id == job.id
+        assert event.payload == {"job_id": str(job.id)}
+        assert event.published_at is None
+        assert db.scalars(select(OutboxEvent)).all() == [event]
 
 
 def test_complete_upload_enforces_ownership_and_origin(clients):
