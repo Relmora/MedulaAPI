@@ -15,6 +15,7 @@ def test_default_origin(monkeypatch):
 
 
 def test_origins_from_environment(monkeypatch):
+    
     monkeypatch.setenv(
         "CORS_ALLOWED_ORIGINS",
         '["https://app.example.com","http://localhost:5173"]',
