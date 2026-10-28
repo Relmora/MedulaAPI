@@ -14,7 +14,7 @@ from backend.documents.service import (
     get_document,
 )
 from backend.errors import AppError
-from backend.models import Document, User
+from backend.models import Document, IngestionJob, OutboxEvent, User
 from backend.object_storage.fake import FakeObjectStorage
 from backend.object_storage.schemas import StoredObjectMetadata
 
@@ -295,7 +295,7 @@ def test_complete_document_verifies_and_persists_storage_metadata(clients):
             checksum_algorithm="crc32c",
         )
 
-        completed = complete_document_upload(
+        completed_result = complete_document_upload(
             db,
             alice,
             workspace_id,
@@ -304,8 +304,10 @@ def test_complete_document_verifies_and_persists_storage_metadata(clients):
             storage=storage,
             now=completed_at,
         )
+        completed = completed_result.document
+        job_id = completed_result.job.id
         first_uploaded_at = completed.uploaded_at
-        retried = complete_document_upload(
+        retried_result = complete_document_upload(
             db,
             alice,
             workspace_id,
@@ -314,6 +316,7 @@ def test_complete_document_verifies_and_persists_storage_metadata(clients):
             storage=storage,
             now=completed_at + timedelta(minutes=1),
         )
+        retried = retried_result.document
 
         assert retried.upload_status == "STORED"
         assert retried.stored_size_bytes == 1024
@@ -321,7 +324,38 @@ def test_complete_document_verifies_and_persists_storage_metadata(clients):
         assert retried.storage_checksum == "checksum"
         assert retried.storage_checksum_algorithm == "crc32c"
         assert retried.uploaded_at == first_uploaded_at
-        assert retried.processing_status == "NOT_QUEUED"
+        assert retried.processing_status == "QUEUED"
+        assert retried_result.job.id == job_id
+        assert retried_result.job.status == "QUEUED"
+        assert retried_result.job.attempt_count == 0
+        assert retried_result.job.max_attempts == 3
+        assert db.scalar(select(IngestionJob).where(IngestionJob.id == job_id))
+        events = db.scalars(select(OutboxEvent)).all()
+        assert len(events) == 1
+        assert events[0].aggregate_id == job_id
+        assert events[0].event_type == "document.ingestion.requested"
+        assert events[0].payload == {
+            "job_id": str(job_id),
+            "document_id": str(completed.id),
+            "purpose": "INITIAL_INGESTION",
+        }
+        assert events[0].published_at is None
+
+        retried_result.job.status = "PROCESSING"
+        retried.processing_status = "PROCESSING"
+        db.flush()
+        completed_again = complete_document_upload(
+            db,
+            alice,
+            workspace_id,
+            knowledge_base_id,
+            document.id,
+            storage=storage,
+            now=completed_at + timedelta(minutes=2),
+        )
+        assert completed_again.job.id == job_id
+        assert completed_again.document.processing_status == "PROCESSING"
+        assert len(db.scalars(select(OutboxEvent)).all()) == 1
 
 
 def test_complete_document_rejects_missing_object(clients):

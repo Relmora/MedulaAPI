@@ -1,6 +1,6 @@
 """Authenticated document upload-intent routes."""
 
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response
@@ -11,6 +11,7 @@ from backend.auth.sessions import require_trusted_origin
 from backend.database import get_db_session
 from backend.documents import service
 from backend.documents.schemas import (
+    DocumentProcessingStatus,
     DocumentUploadCompleteRequest,
     DocumentUploadCompleteResponse,
     DocumentUploadIntentCreate,
@@ -83,7 +84,7 @@ def complete_upload(
     storage: ConfiguredObjectStorage,
 ) -> DocumentUploadCompleteResponse:
     del payload
-    document = service.complete_document_upload(
+    completed = service.complete_document_upload(
         db,
         user,
         workspace_id,
@@ -91,9 +92,23 @@ def complete_upload(
         document_id,
         storage=storage,
     )
+    document = completed.document
+    if document.stored_size_bytes is None or document.uploaded_at is None:
+        raise RuntimeError("Completed upload is missing verified storage metadata.")
+    if document.processing_status not in {
+        "QUEUED",
+        "PROCESSING",
+        "READY",
+        "REJECTED",
+        "FAILED",
+    }:
+        raise RuntimeError("Completed upload has an invalid processing status.")
+
     result = DocumentUploadCompleteResponse(
         document_id=document.id,
+        job_id=completed.job.id,
         upload_status="STORED",
+        processing_status=cast(DocumentProcessingStatus, document.processing_status),
         stored_size_bytes=document.stored_size_bytes,
         storage_version=document.storage_version,
         storage_checksum=document.storage_checksum,
