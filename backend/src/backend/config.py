@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AnyHttpUrl, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     rabbitmq_exchange: str = "medulla.events"
     rabbitmq_ingestion_queue: str = "document.ingestion"
     rabbitmq_ingestion_routing_key: str = "document.ingestion.requested"
+
+    outbox_publisher_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    outbox_publisher_batch_size: int = Field(default=50, gt=0, le=1000)
+    outbox_publisher_claim_seconds: int = Field(default=30, gt=0, le=3600)
+    outbox_publisher_error_backoff_seconds: float = Field(default=1.0, gt=0, le=60)
+    outbox_publisher_max_error_backoff_seconds: float = Field(
+        default=30.0, gt=0, le=300
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

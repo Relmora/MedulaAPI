@@ -14,6 +14,7 @@ from backend.models import OutboxEvent
 DEFAULT_CLAIM_TTL = timedelta(seconds=30)
 DEFAULT_BATCH_SIZE = 50
 MAX_RECORDED_ERROR_LENGTH = 4000
+MAX_PUBLISHER_ID_LENGTH = 200
 
 SessionFactory = Callable[[], Session]
 Clock = Callable[[], datetime]
@@ -94,8 +95,10 @@ class OutboxPublisher:
         normalized_publisher_id = publisher_id.strip()
         if not normalized_publisher_id:
             raise ValueError("publisher_id must be nonempty")
-        if len(normalized_publisher_id) > 200:
-            raise ValueError("publisher_id must not exceed 200 characters")
+        if len(normalized_publisher_id) > MAX_PUBLISHER_ID_LENGTH:
+            raise ValueError(
+                f"publisher_id must not exceed {MAX_PUBLISHER_ID_LENGTH} characters"
+            )
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if claim_ttl <= timedelta(0):

@@ -8,7 +8,21 @@ from datetime import UTC, datetime
 from json import dumps
 
 request_id_context: ContextVar[str | None] = ContextVar("request_id", default=None)
-SAFE_FIELDS = ("event", "method", "route", "status_code", "duration_ms", "error_code")
+SAFE_FIELDS = (
+    "event",
+    "method",
+    "route",
+    "status_code",
+    "duration_ms",
+    "error_code",
+    "publisher_id",
+    "claimed",
+    "published",
+    "failed",
+    "lost_claims",
+    "failure_count",
+    "retry_seconds",
+)
 
 
 class JSONFormatter(logging.Formatter):
