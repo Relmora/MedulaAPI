@@ -139,7 +139,11 @@ def test_complete_upload_verifies_object_and_is_idempotent(clients):
         assert event is not None
         assert event.aggregate_type == "INGESTION_JOB"
         assert event.aggregate_id == job.id
-        assert event.payload == {"job_id": str(job.id)}
+        assert event.payload == {
+            "job_id": str(job.id),
+            "document_id": str(document.id),
+            "purpose": "INITIAL_INGESTION",
+        }
         assert event.published_at is None
         assert db.scalars(select(OutboxEvent)).all() == [event]
 

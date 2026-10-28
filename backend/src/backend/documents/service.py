@@ -205,7 +205,11 @@ def complete_document_upload(
                 aggregate_type="INGESTION_JOB",
                 aggregate_id=job.id,
                 schema_version=1,
-                payload={"job_id": str(job.id)},
+                payload={
+                    "job_id": str(job.id),
+                    "document_id": str(document.id),
+                    "purpose": job.purpose,
+                },
                 available_at=completed_at,
             )
         )
