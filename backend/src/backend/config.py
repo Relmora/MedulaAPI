@@ -7,15 +7,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     cors_allowed_origins: list[AnyHttpUrl] = [AnyHttpUrl("http://localhost:5173")]
 
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_level: Literal[
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    ] = "INFO"
 
     auth_signing_key: SecretStr = SecretStr("")
     auth_cookie_secure: bool = True
-    auth_allowed_origins: list[AnyHttpUrl] = [
-        AnyHttpUrl("http://localhost:5173"),
-        AnyHttpUrl("http://localhost:8000"),
-        AnyHttpUrl("http://127.0.0.1:8000"),
-    ]
 
     registration_enabled: bool = False
 
@@ -28,6 +29,17 @@ class Settings(BaseSettings):
     db_name: str = "MedullaAPI"
     db_user: str = "medula_app"
     db_password: SecretStr = SecretStr("")
+
+    rabbitmq_host: str = "127.0.0.1"
+    rabbitmq_port: int = 5672
+    rabbitmq_username: str = "medula_app"
+    rabbitmq_password: SecretStr = SecretStr("")
+    rabbitmq_vhost: str = "medula"
+    rabbitmq_tls: bool = False
+
+    rabbitmq_exchange: str = "medulla.events"
+    rabbitmq_ingestion_queue: str = "document.ingestion"
+    rabbitmq_ingestion_routing_key: str = "document.ingestion.requested"
 
     model_config = SettingsConfigDict(
         env_file=".env",

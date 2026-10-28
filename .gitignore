@@ -10,6 +10,7 @@ dist/
 # Local configuration and secrets
 .env
 .env.*
+.env.rabbitmq
 !.env.example
 
 # Local tooling
