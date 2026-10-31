@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
 
+from backend.object_storage.errors import ObjectVersionMismatchError
 from backend.object_storage.schemas import StoredObjectMetadata, UploadInstructions
 
 
@@ -23,6 +24,7 @@ class FakeObjectStorage:
         self._bucket = bucket
         self.upload_requests: list[UploadGrantRequest] = []
         self.objects: dict[str, StoredObjectMetadata] = {}
+        self.object_contents: dict[str, bytes] = {}
 
     @property
     def provider(self) -> str:
@@ -67,5 +69,20 @@ class FakeObjectStorage:
         except KeyError as exc:
             raise FileNotFoundError(object_key) from exc
 
+    def read_object(
+        self,
+        object_key: str,
+        *,
+        version: str | None = None,
+    ) -> bytes:
+        metadata = self.get_object_metadata(object_key)
+        if version is not None and metadata.version != version:
+            raise ObjectVersionMismatchError(object_key)
+        try:
+            return self.object_contents[object_key]
+        except KeyError as exc:
+            raise FileNotFoundError(object_key) from exc
+
     def delete_object(self, object_key: str) -> None:
         self.objects.pop(object_key, None)
+        self.object_contents.pop(object_key, None)

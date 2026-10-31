@@ -24,4 +24,11 @@ class ObjectStorage(Protocol):
 
     def get_object_metadata(self, object_key: str) -> StoredObjectMetadata: ...
 
+    def read_object(
+        self,
+        object_key: str,
+        *,
+        version: str | None = None,
+    ) -> bytes: ...
+
     def delete_object(self, object_key: str) -> None: ...

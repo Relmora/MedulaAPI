@@ -10,6 +10,7 @@ import { MobileHeader } from "./components/mobile-header";
 
 export default function AuthenticatedLayout() {
   const location = useLocation();
+  
   const navigate = useNavigate();
 
   const session = useQuery({

@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     rabbitmq_ingestion_queue: str = "document.ingestion"
     rabbitmq_ingestion_routing_key: str = "document.ingestion.requested"
 
+    ingestion_worker_prefetch_count: int = Field(default=1, gt=0, le=100)
+    ingestion_worker_lease_seconds: int = Field(default=60, gt=0, le=3600)
+
     outbox_publisher_poll_seconds: float = Field(default=1.0, gt=0, le=60)
     outbox_publisher_batch_size: int = Field(default=50, gt=0, le=1000)
     outbox_publisher_claim_seconds: int = Field(default=30, gt=0, le=3600)

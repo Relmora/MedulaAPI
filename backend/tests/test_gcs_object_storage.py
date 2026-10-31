@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 
 import pytest
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
+from backend.object_storage import ObjectVersionMismatchError
 from backend.object_storage.gcs import GCSObjectStorage
 
 
@@ -59,6 +60,24 @@ def test_gcs_reads_provider_neutral_metadata():
     assert metadata.version == "123"
     assert metadata.checksum == "crc-value"
     assert metadata.checksum_algorithm == "crc32c"
+
+
+def test_gcs_reads_the_requested_immutable_generation():
+    storage, _, _, blob = make_storage()
+    blob.download_as_bytes.return_value = b"document"
+
+    content = storage.read_object("documents/id/original", version="123")
+
+    assert content == b"document"
+    blob.download_as_bytes.assert_called_once_with(if_generation_match=123)
+
+
+def test_gcs_maps_changed_generation_to_provider_neutral_error():
+    storage, _, _, blob = make_storage()
+    blob.download_as_bytes.side_effect = PreconditionFailed("changed")
+
+    with pytest.raises(ObjectVersionMismatchError):
+        storage.read_object("documents/id/original", version="123")
 
 
 def test_gcs_maps_missing_object_and_delete_is_idempotent():
