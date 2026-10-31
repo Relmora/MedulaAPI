@@ -29,6 +29,8 @@ class HandleDisposition(StrEnum):
     PARSED = "PARSED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
+    REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
+    ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
     REJECTED_INVALID = "REJECTED_INVALID"
 
@@ -96,6 +98,20 @@ class IngestionWorker:
                     claimed=result.claimed,
                     source=pipeline_result.source,
                     parsed_artifact=pipeline_result.parsed_artifact,
+                )
+            if pipeline_result.disposition is PipelineDisposition.RETRY_SCHEDULED:
+                delivery.reject(requeue=True)
+                return HandleResult(
+                    HandleDisposition.REQUEUED_TRANSIENT_FAILURE,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.RETRY_EXHAUSTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_RETRY_EXHAUSTED,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
                 )
             return HandleResult(
                 HandleDisposition.SOURCE_VALIDATED,

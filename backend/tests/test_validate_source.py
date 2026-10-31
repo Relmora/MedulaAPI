@@ -28,6 +28,7 @@ from backend.models import (
     User,
     Workspace,
 )
+from backend.object_storage import ObjectStorageUnavailableError
 from backend.object_storage.fake import FakeObjectStorage
 from backend.object_storage.schemas import StoredObjectMetadata
 
@@ -301,3 +302,57 @@ def test_worker_parses_uploads_and_records_artifact_before_normalize(
         assert saved_document.parsed_storage_version == "1"
         assert saved_job.current_stage == "NORMALIZE"
         assert attempt.current_stage == "NORMALIZE"
+
+
+def test_worker_requeues_temporary_parsed_artifact_upload_failure(
+    ingestion_database,
+):
+    class UnavailableStorage(FakeObjectStorage):
+        def write_object(self, object_key, content, *, content_type):
+            raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = b"Retry this document."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = UnavailableStorage(provider="gcs", bucket="documents")
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    storage.object_contents[document.storage_object_key] = content
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "PARSED_ARTIFACT_UPLOAD_FAILED"
+    assert delivery.rejected_with is True
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "RETRY_SCHEDULED"
+        assert saved_job.current_stage == "PARSE"
+        assert saved_job.next_attempt_at.replace(tzinfo=UTC) == now
+        assert attempt.status == "FAILED"
+        assert attempt.failure_class == "TRANSIENT"
+        assert attempt.failure_code == "PARSED_ARTIFACT_UPLOAD_FAILED"
