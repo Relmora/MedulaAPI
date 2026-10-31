@@ -80,4 +80,3 @@ def _uuid(value: object, field: str) -> UUID:
         return UUID(str(value))
     except (AttributeError, TypeError, ValueError) as error:
         raise InvalidMessage(f"Message {field} must be a UUID.") from error
-

@@ -127,4 +127,3 @@ def test_consumer_uses_durable_topology_manual_ack_and_bounded_prefetch():
     assert body == b"message"
     delivery.acknowledge()
     assert channel.acknowledged == [{"delivery_tag": 17}]
-

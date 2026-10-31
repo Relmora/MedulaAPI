@@ -103,7 +103,9 @@ def envelope(job: IngestionJob, document: Document) -> dict[str, object]:
 
 
 def message(job: IngestionJob, document: Document) -> IngestionRequestedMessage:
-    return IngestionRequestedMessage.from_body(json.dumps(envelope(job, document)).encode())
+    return IngestionRequestedMessage.from_body(
+        json.dumps(envelope(job, document)).encode()
+    )
 
 
 def test_message_matches_the_published_outbox_envelope(ingestion_database):

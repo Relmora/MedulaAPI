@@ -55,17 +55,14 @@ def upgrade() -> None:
             name="ck_ingestion_job_attempts_stage_length",
         ),
         sa.CheckConstraint(
-            "status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'ABANDONED', "
-            "'CANCELLED')",
+            "status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'ABANDONED', 'CANCELLED')",
             name="ck_ingestion_job_attempts_status",
         ),
         sa.CheckConstraint(
             "length(worker_id) BETWEEN 1 AND 255",
             name="ck_ingestion_job_attempts_worker_id_length",
         ),
-        sa.ForeignKeyConstraint(
-            ["job_id"], ["ingestion_jobs.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["job_id"], ["ingestion_jobs.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "job_id",

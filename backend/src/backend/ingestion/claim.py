@@ -111,9 +111,7 @@ class IngestionJobClaimer:
                 )
 
             document = db.scalar(
-                select(Document)
-                .where(Document.id == job.document_id)
-                .with_for_update()
+                select(Document).where(Document.id == job.document_id).with_for_update()
             )
             if document is None:
                 return ClaimResult(
@@ -183,4 +181,3 @@ class IngestionJobClaimer:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("clock must return a timezone-aware datetime")
         return now
-

@@ -32,8 +32,7 @@ class IngestionJobAttempt(Base):
             name="ck_ingestion_job_attempts_worker_id_length",
         ),
         CheckConstraint(
-            "status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'ABANDONED', "
-            "'CANCELLED')",
+            "status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'ABANDONED', 'CANCELLED')",
             name="ck_ingestion_job_attempts_status",
         ),
         CheckConstraint(
@@ -85,4 +84,3 @@ class IngestionJobAttempt(Base):
     failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-
