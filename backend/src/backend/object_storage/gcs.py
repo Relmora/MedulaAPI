@@ -2,9 +2,10 @@
 
 from datetime import datetime
 
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 
+from backend.object_storage.errors import ObjectVersionMismatchError
 from backend.object_storage.schemas import StoredObjectMetadata, UploadInstructions
 
 
@@ -87,6 +88,28 @@ class GCSObjectStorage:
             checksum=checksum,
             checksum_algorithm=checksum_algorithm,
         )
+
+    def read_object(
+        self,
+        object_key: str,
+        *,
+        version: str | None = None,
+    ) -> bytes:
+        blob = self._client.bucket(self.bucket).blob(object_key)
+        generation = None
+        if version is not None:
+            try:
+                generation = int(version)
+            except ValueError as exc:
+                raise ObjectVersionMismatchError(
+                    f"invalid GCS generation: {version}"
+                ) from exc
+        try:
+            return blob.download_as_bytes(if_generation_match=generation)
+        except NotFound as exc:
+            raise FileNotFoundError(object_key) from exc
+        except PreconditionFailed as exc:
+            raise ObjectVersionMismatchError(object_key) from exc
 
     def delete_object(self, object_key: str) -> None:
         blob = self._client.bucket(self.bucket).blob(object_key)

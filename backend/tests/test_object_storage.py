@@ -43,7 +43,12 @@ def test_fake_storage_metadata_and_idempotent_delete():
         checksum_algorithm="crc32c",
     )
     storage.objects["documents/id/original"] = metadata
+    storage.object_contents["documents/id/original"] = b"contents"
     assert storage.get_object_metadata("documents/id/original") == metadata
+    assert (
+        storage.read_object("documents/id/original", version="version-1")
+        == b"contents"
+    )
     storage.delete_object("documents/id/original")
     storage.delete_object("documents/id/original")
     with pytest.raises(FileNotFoundError):

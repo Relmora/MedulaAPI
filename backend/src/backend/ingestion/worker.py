@@ -10,6 +10,11 @@ from backend.ingestion.claim import (
     IngestionJobClaimer,
 )
 from backend.ingestion.messages import IngestionRequestedMessage, InvalidMessage
+from backend.ingestion.pipeline import (
+    IngestionPipeline,
+    PipelineDisposition,
+)
+from backend.ingestion.stages import ValidatedSource
 
 
 class Delivery(Protocol):
@@ -20,6 +25,8 @@ class Delivery(Protocol):
 
 class HandleDisposition(StrEnum):
     CLAIMED = "CLAIMED"
+    SOURCE_VALIDATED = "SOURCE_VALIDATED"
+    ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
     REJECTED_INVALID = "REJECTED_INVALID"
 
@@ -28,15 +35,23 @@ class HandleDisposition(StrEnum):
 class HandleResult:
     disposition: HandleDisposition
     claimed: ClaimedIngestionJob | None = None
+    source: ValidatedSource | None = None
     reason: str | None = None
 
 
 class IngestionWorker:
     """Validate a delivery and establish durable ownership before RAG work."""
 
-    def __init__(self, claimer: IngestionJobClaimer, *, worker_id: str) -> None:
+    def __init__(
+        self,
+        claimer: IngestionJobClaimer,
+        *,
+        worker_id: str,
+        pipeline: IngestionPipeline | None = None,
+    ) -> None:
         self._claimer = claimer
         self._worker_id = worker_id
+        self._pipeline = pipeline
 
     def handle(self, body: bytes, delivery: Delivery) -> HandleResult:
         try:
@@ -56,11 +71,24 @@ class IngestionWorker:
                 reason=result.reason,
             )
 
-        # A successful claim deliberately remains unacknowledged. The upcoming
-        # RAG pipeline owns this delivery until its durable terminal/retry
-        # transaction commits.
+        if self._pipeline is not None:
+            pipeline_result = self._pipeline.process(result.claimed)
+            if pipeline_result.disposition is PipelineDisposition.SOURCE_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_SOURCE_REJECTED,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
+                )
+            return HandleResult(
+                HandleDisposition.SOURCE_VALIDATED,
+                claimed=result.claimed,
+                source=pipeline_result.source,
+            )
+
+        # Until a pipeline is composed, a successful claim remains
+        # unacknowledged. Later stages own it through a durable outcome.
         return HandleResult(
             HandleDisposition.CLAIMED,
             claimed=result.claimed,
         )
-
