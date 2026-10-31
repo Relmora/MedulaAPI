@@ -72,8 +72,7 @@ class DeterministicNormalizer:
         text = "".join(
             character
             for character in text
-            if character in {"\n", "\t"}
-            or unicodedata.category(character) != "Cc"
+            if character in {"\n", "\t"} or unicodedata.category(character) != "Cc"
         )
         if block.block_type in WHITESPACE_SENSITIVE_BLOCK_TYPES:
             return text.strip("\n")

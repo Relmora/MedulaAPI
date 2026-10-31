@@ -137,8 +137,7 @@ def test_normalize_stage_uploads_versioned_json_artifact():
     artifact = NormalizeStage(DeterministicNormalizer(), storage).execute(parsed)
 
     expected_key = (
-        f"documents/{parsed.document_id}/normalized/source-123/"
-        "deterministic-v1.json"
+        f"documents/{parsed.document_id}/normalized/source-123/deterministic-v1.json"
     )
     assert artifact.object_key == expected_key
     assert artifact.storage_version == "1"

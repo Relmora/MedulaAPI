@@ -391,9 +391,7 @@ def test_worker_normalizes_uploads_and_advances_to_chunk(ingestion_database):
 
     result = worker.handle(envelope(job, document), delivery)
 
-    expected_key = (
-        f"documents/{document.id}/normalized/123/deterministic-v1.json"
-    )
+    expected_key = f"documents/{document.id}/normalized/123/deterministic-v1.json"
     assert result.disposition is HandleDisposition.NORMALIZED
     assert result.normalized_artifact is not None
     assert result.normalized_artifact.object_key == expected_key
