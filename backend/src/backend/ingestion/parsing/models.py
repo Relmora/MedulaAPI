@@ -100,4 +100,9 @@ class ParsedDocument(BaseModel):
             raise ValueError(
                 "statistics extracted_character_count does not match blocks"
             )
+        if self.page_count is not None and any(
+            block.page_number is not None and block.page_number > self.page_count
+            for block in self.blocks
+        ):
+            raise ValueError("block page number exceeds document page count")
         return self
