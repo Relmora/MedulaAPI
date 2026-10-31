@@ -12,16 +12,19 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "fastapi[standard]>=0.143.1",
     "google-cloud-storage>=3.17.1",
+    "markdown-it-py>=4.0,<5",
     "pika>=1.4.4",
     "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.16.0",
     "pyjwt>=2.15.1",
+    "pypdf>=6.21.4,<7",
     "sqlalchemy>=2.1.4",
 ]
 
 [project.scripts]
 backend = "backend:main"
 outbox-publisher = "backend.outbox.runner:main"
+ingestion-worker = "backend.ingestion.runner:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

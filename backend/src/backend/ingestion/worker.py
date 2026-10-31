@@ -14,7 +14,7 @@ from backend.ingestion.pipeline import (
     IngestionPipeline,
     PipelineDisposition,
 )
-from backend.ingestion.stages import ValidatedSource
+from backend.ingestion.stages import ParsedArtifact, ValidatedSource
 
 
 class Delivery(Protocol):
@@ -26,7 +26,11 @@ class Delivery(Protocol):
 class HandleDisposition(StrEnum):
     CLAIMED = "CLAIMED"
     SOURCE_VALIDATED = "SOURCE_VALIDATED"
+    PARSED = "PARSED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
+    ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
+    REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
+    ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
     REJECTED_INVALID = "REJECTED_INVALID"
 
@@ -36,6 +40,7 @@ class HandleResult:
     disposition: HandleDisposition
     claimed: ClaimedIngestionJob | None = None
     source: ValidatedSource | None = None
+    parsed_artifact: ParsedArtifact | None = None
     reason: str | None = None
 
 
@@ -77,6 +82,34 @@ class IngestionWorker:
                 delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_SOURCE_REJECTED,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.PARSE_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_PARSE_REJECTED,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.PARSED:
+                return HandleResult(
+                    HandleDisposition.PARSED,
+                    claimed=result.claimed,
+                    source=pipeline_result.source,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                )
+            if pipeline_result.disposition is PipelineDisposition.RETRY_SCHEDULED:
+                delivery.reject(requeue=True)
+                return HandleResult(
+                    HandleDisposition.REQUEUED_TRANSIENT_FAILURE,
+                    claimed=result.claimed,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.RETRY_EXHAUSTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_RETRY_EXHAUSTED,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )

@@ -17,7 +17,7 @@ ConnectionFactory = Callable[[pika.ConnectionParameters], BlockingConnection]
 
 
 class DeliveryHandler(Protocol):
-    def handle(self, body: bytes, delivery: Delivery): ...
+    def handle(self, body: bytes, delivery: Delivery) -> object: ...
 
 
 @dataclass
