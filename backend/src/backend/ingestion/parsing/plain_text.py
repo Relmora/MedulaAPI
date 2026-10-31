@@ -1,6 +1,9 @@
 """Deterministic parser for validated UTF-8 plain-text documents."""
 
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
 from backend.ingestion.parsing.interface import ParseError
 from backend.ingestion.parsing.models import (
@@ -8,7 +11,9 @@ from backend.ingestion.parsing.models import (
     ParsedDocument,
     ParseStatistics,
 )
-from backend.ingestion.stages import ValidatedSource
+
+if TYPE_CHECKING:
+    from backend.ingestion.stages.validate_source import ValidatedSource
 
 PARAGRAPH_SEPARATOR = re.compile(r"(?:\r?\n)[\t ]*(?:\r?\n)+")
 

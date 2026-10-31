@@ -72,6 +72,29 @@ def test_gcs_reads_the_requested_immutable_generation():
     blob.download_as_bytes.assert_called_once_with(if_generation_match=123)
 
 
+def test_gcs_writes_and_returns_artifact_metadata():
+    storage, _, _, blob = make_storage()
+    blob.size = 20
+    blob.content_type = "application/json"
+    blob.generation = 456
+    blob.crc32c = "crc-value"
+    blob.md5_hash = None
+
+    metadata = storage.write_object(
+        "documents/id/parsed/123.json",
+        b'{"schema_version":1}',
+        content_type="application/json",
+    )
+
+    blob.upload_from_string.assert_called_once_with(
+        b'{"schema_version":1}',
+        content_type="application/json",
+    )
+    blob.reload.assert_called_once_with()
+    assert metadata.version == "456"
+    assert metadata.checksum == "crc-value"
+
+
 def test_gcs_maps_changed_generation_to_provider_neutral_error():
     storage, _, _, blob = make_storage()
     blob.download_as_bytes.side_effect = PreconditionFailed("changed")

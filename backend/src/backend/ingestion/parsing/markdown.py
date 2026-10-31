@@ -1,6 +1,9 @@
 """Structure-preserving parser for CommonMark documents."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -11,7 +14,9 @@ from backend.ingestion.parsing.models import (
     ParsedDocument,
     ParseStatistics,
 )
-from backend.ingestion.stages import ValidatedSource
+
+if TYPE_CHECKING:
+    from backend.ingestion.stages.validate_source import ValidatedSource
 
 
 class MarkdownParser:

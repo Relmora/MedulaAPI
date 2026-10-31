@@ -8,7 +8,10 @@ from enum import StrEnum
 from sqlalchemy import select
 
 from backend.ingestion.claim import ClaimedIngestionJob, SessionFactory
+from backend.ingestion.parsing import ParseError
 from backend.ingestion.stages import (
+    ParsedArtifact,
+    ParseStage,
     SourceValidationError,
     SourceValidator,
     ValidatedSource,
@@ -22,12 +25,15 @@ MAX_FAILURE_MESSAGE_LENGTH = 4000
 class PipelineDisposition(StrEnum):
     SOURCE_VALIDATED = "SOURCE_VALIDATED"
     SOURCE_REJECTED = "SOURCE_REJECTED"
+    PARSED = "PARSED"
+    PARSE_REJECTED = "PARSE_REJECTED"
 
 
 @dataclass(frozen=True)
 class PipelineResult:
     disposition: PipelineDisposition
     source: ValidatedSource | None = None
+    parsed_artifact: ParsedArtifact | None = None
     error_code: str | None = None
 
 
@@ -46,31 +52,48 @@ class IngestionPipeline:
         self,
         session_factory: SessionFactory,
         source_validator: SourceValidator,
+        parse_stage: ParseStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
         self._session_factory = session_factory
         self._source_validator = source_validator
+        self._parse_stage = parse_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
         try:
             source = self._source_validator.validate(claimed)
         except SourceValidationError as error:
-            self._record_source_rejection(claimed, error)
+            self._record_permanent_failure(claimed, error)
             return PipelineResult(
                 PipelineDisposition.SOURCE_REJECTED,
                 error_code=error.code,
             )
+        if self._parse_stage is None:
+            return PipelineResult(
+                PipelineDisposition.SOURCE_VALIDATED,
+                source=source,
+            )
+        try:
+            artifact = self._parse_stage.execute(source)
+        except ParseError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.PARSE_REJECTED,
+                error_code=error.code,
+            )
+        self._record_parse_success(claimed, artifact)
         return PipelineResult(
-            PipelineDisposition.SOURCE_VALIDATED,
+            PipelineDisposition.PARSED,
             source=source,
+            parsed_artifact=artifact,
         )
 
-    def _record_source_rejection(
+    def _record_permanent_failure(
         self,
         claimed: ClaimedIngestionJob,
-        error: SourceValidationError,
+        error: SourceValidationError | ParseError,
     ) -> None:
         now = self._aware_now()
         with self._session_factory() as db, db.begin():
@@ -122,6 +145,52 @@ class IngestionPipeline:
             document.failure_code = error.code
             document.processed_at = now
             document.updated_at = now
+
+    def _record_parse_success(
+        self,
+        claimed: ClaimedIngestionJob,
+        artifact: ParsedArtifact,
+    ) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            document.parsed_storage_object_key = artifact.object_key
+            document.parsed_storage_version = artifact.storage_version
+            document.failure_code = None
+            document.updated_at = now
+            job.current_stage = "NORMALIZE"
+            job.last_error_code = None
+            job.updated_at = now
+            attempt.current_stage = "NORMALIZE"
+            attempt.heartbeat_at = now
 
     def _aware_now(self) -> datetime:
         now = self._clock()

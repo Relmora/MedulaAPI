@@ -31,4 +31,12 @@ class ObjectStorage(Protocol):
         version: str | None = None,
     ) -> bytes: ...
 
+    def write_object(
+        self,
+        object_key: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> StoredObjectMetadata: ...
+
     def delete_object(self, object_key: str) -> None: ...

@@ -117,3 +117,28 @@ class GCSObjectStorage:
             blob.delete()
         except NotFound:
             return
+
+    def write_object(
+        self,
+        object_key: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> StoredObjectMetadata:
+        if not object_key.strip() or not content or not content_type.strip():
+            raise ValueError("object key, content, and content type must be nonempty")
+        blob = self._client.bucket(self.bucket).blob(object_key)
+        blob.upload_from_string(content, content_type=content_type)
+        blob.reload()
+        checksum = blob.crc32c
+        checksum_algorithm = "crc32c" if checksum is not None else None
+        if checksum is None and blob.md5_hash is not None:
+            checksum = blob.md5_hash
+            checksum_algorithm = "md5"
+        return StoredObjectMetadata(
+            size_bytes=blob.size or len(content),
+            content_type=blob.content_type or content_type,
+            version=str(blob.generation) if blob.generation is not None else None,
+            checksum=checksum,
+            checksum_algorithm=checksum_algorithm,
+        )

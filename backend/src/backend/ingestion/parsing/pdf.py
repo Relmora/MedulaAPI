@@ -1,9 +1,11 @@
 """Phase-1 parser for digital PDFs; scanned PDFs require future OCR."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import Callable, Sequence
 from io import BytesIO
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import pypdf
 from pypdf import PdfReader
@@ -15,7 +17,9 @@ from backend.ingestion.parsing.models import (
     ParsedDocument,
     ParseStatistics,
 )
-from backend.ingestion.stages import ValidatedSource
+
+if TYPE_CHECKING:
+    from backend.ingestion.stages.validate_source import ValidatedSource
 
 PARAGRAPH_SEPARATOR = re.compile(r"(?:\r?\n)[\t ]*(?:\r?\n)+")
 

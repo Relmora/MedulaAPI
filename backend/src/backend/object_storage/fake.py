@@ -1,5 +1,6 @@
 """Deterministic in-memory storage adapter for unit and API tests."""
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
@@ -86,3 +87,28 @@ class FakeObjectStorage:
     def delete_object(self, object_key: str) -> None:
         self.objects.pop(object_key, None)
         self.object_contents.pop(object_key, None)
+
+    def write_object(
+        self,
+        object_key: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> StoredObjectMetadata:
+        if not object_key.strip() or not content or not content_type.strip():
+            raise ValueError("object key, content, and content type must be nonempty")
+        version = (
+            str(int(self.objects.get(object_key).version or "0") + 1)
+            if object_key in self.objects
+            else "1"
+        )
+        metadata = StoredObjectMetadata(
+            size_bytes=len(content),
+            content_type=content_type,
+            version=version,
+            checksum=hashlib.sha256(content).hexdigest(),
+            checksum_algorithm="sha256",
+        )
+        self.objects[object_key] = metadata
+        self.object_contents[object_key] = content
+        return metadata

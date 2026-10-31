@@ -13,10 +13,12 @@ from backend.ingestion import (
     IngestionPipeline,
     IngestionRequestedMessage,
     IngestionWorker,
+    ParseStage,
     PipelineDisposition,
     SourceValidationError,
     SourceValidator,
 )
+from backend.ingestion.parsing import ParserRegistry, PlainTextParser
 from backend.models import (
     Base,
     Document,
@@ -249,3 +251,53 @@ def test_worker_keeps_valid_source_unacknowledged_for_parse(ingestion_database):
     assert result.source.content == content
     assert delivery.acknowledged is False
     assert delivery.rejected_with is None
+
+
+def test_worker_parses_uploads_and_records_artifact_before_normalize(
+    ingestion_database,
+):
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = b"First paragraph.\n\nSecond paragraph."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    expected_key = f"documents/{document.id}/parsed/123.json"
+    assert result.disposition is HandleDisposition.PARSED
+    assert result.parsed_artifact is not None
+    assert result.parsed_artifact.object_key == expected_key
+    assert b'"First paragraph."' in storage.object_contents[expected_key]
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_document.parsed_storage_object_key == expected_key
+        assert saved_document.parsed_storage_version == "1"
+        assert saved_job.current_stage == "NORMALIZE"
+        assert attempt.current_stage == "NORMALIZE"

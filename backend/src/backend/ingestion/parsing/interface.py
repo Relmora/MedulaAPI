@@ -1,9 +1,13 @@
 """Common parser interface used by the PARSE stage."""
 
-from typing import Protocol
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
 
 from backend.ingestion.parsing.models import ParsedDocument
-from backend.ingestion.stages import ValidatedSource
+
+if TYPE_CHECKING:
+    from backend.ingestion.stages.validate_source import ValidatedSource
 
 
 class ParseError(ValueError):

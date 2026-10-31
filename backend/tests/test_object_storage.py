@@ -54,6 +54,21 @@ def test_fake_storage_metadata_and_idempotent_delete():
         storage.get_object_metadata("documents/id/original")
 
 
+def test_fake_storage_writes_server_generated_artifact():
+    storage = FakeObjectStorage()
+
+    metadata = storage.write_object(
+        "documents/id/parsed/1.json",
+        b'{"schema_version":1}',
+        content_type="application/json",
+    )
+
+    assert metadata.size_bytes == 20
+    assert metadata.content_type == "application/json"
+    assert metadata.version == "1"
+    assert storage.read_object("documents/id/parsed/1.json") == b'{"schema_version":1}'
+
+
 @pytest.mark.parametrize("provider,bucket", [("", "bucket"), ("gcs", "")])
 def test_fake_storage_rejects_invalid_location(provider, bucket):
     with pytest.raises(ValueError, match="nonempty"):
