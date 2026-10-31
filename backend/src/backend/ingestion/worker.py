@@ -14,7 +14,11 @@ from backend.ingestion.pipeline import (
     IngestionPipeline,
     PipelineDisposition,
 )
-from backend.ingestion.stages import ParsedArtifact, ValidatedSource
+from backend.ingestion.stages import (
+    NormalizedArtifact,
+    ParsedArtifact,
+    ValidatedSource,
+)
 
 
 class Delivery(Protocol):
@@ -27,8 +31,10 @@ class HandleDisposition(StrEnum):
     CLAIMED = "CLAIMED"
     SOURCE_VALIDATED = "SOURCE_VALIDATED"
     PARSED = "PARSED"
+    NORMALIZED = "NORMALIZED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
+    ACKNOWLEDGED_NORMALIZE_REJECTED = "ACKNOWLEDGED_NORMALIZE_REJECTED"
     REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
@@ -41,6 +47,7 @@ class HandleResult:
     claimed: ClaimedIngestionJob | None = None
     source: ValidatedSource | None = None
     parsed_artifact: ParsedArtifact | None = None
+    normalized_artifact: NormalizedArtifact | None = None
     reason: str | None = None
 
 
@@ -91,6 +98,22 @@ class IngestionWorker:
                     HandleDisposition.ACKNOWLEDGED_PARSE_REJECTED,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.NORMALIZE_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_NORMALIZE_REJECTED,
+                    claimed=result.claimed,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.NORMALIZED:
+                return HandleResult(
+                    HandleDisposition.NORMALIZED,
+                    claimed=result.claimed,
+                    source=pipeline_result.source,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
                 )
             if pipeline_result.disposition is PipelineDisposition.PARSED:
                 return HandleResult(
