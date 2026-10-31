@@ -14,6 +14,8 @@ from backend.ingestion.pipeline import (
     PipelineResult,
 )
 from backend.ingestion.stages import (
+    NormalizedArtifact,
+    NormalizeStage,
     ParsedArtifact,
     ParseStage,
     SourceValidationError,
@@ -34,6 +36,8 @@ __all__ = [
     "IngestionWorker",
     "InvalidMessage",
     "LostAttemptOwnershipError",
+    "NormalizedArtifact",
+    "NormalizeStage",
     "PipelineDisposition",
     "PipelineResult",
     "ParseStage",

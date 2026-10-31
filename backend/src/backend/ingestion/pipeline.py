@@ -8,8 +8,11 @@ from enum import StrEnum
 from sqlalchemy import select
 
 from backend.ingestion.claim import ClaimedIngestionJob, SessionFactory
+from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
 from backend.ingestion.stages import (
+    NormalizedArtifact,
+    NormalizeStage,
     ParsedArtifact,
     ParseStage,
     SourceValidationError,
@@ -28,6 +31,8 @@ class PipelineDisposition(StrEnum):
     SOURCE_REJECTED = "SOURCE_REJECTED"
     PARSED = "PARSED"
     PARSE_REJECTED = "PARSE_REJECTED"
+    NORMALIZED = "NORMALIZED"
+    NORMALIZE_REJECTED = "NORMALIZE_REJECTED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
@@ -37,6 +42,7 @@ class PipelineResult:
     disposition: PipelineDisposition
     source: ValidatedSource | None = None
     parsed_artifact: ParsedArtifact | None = None
+    normalized_artifact: NormalizedArtifact | None = None
     error_code: str | None = None
 
 
@@ -56,12 +62,14 @@ class IngestionPipeline:
         session_factory: SessionFactory,
         source_validator: SourceValidator,
         parse_stage: ParseStage | None = None,
+        normalize_stage: NormalizeStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
         self._session_factory = session_factory
         self._source_validator = source_validator
         self._parse_stage = parse_stage
+        self._normalize_stage = normalize_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
@@ -83,6 +91,7 @@ class IngestionPipeline:
         except ObjectStorageUnavailableError as error:
             retry_scheduled = self._record_retryable_failure(
                 claimed,
+                stage="PARSE",
                 code="PARSED_ARTIFACT_UPLOAD_FAILED",
                 message=str(error),
             )
@@ -99,16 +108,47 @@ class IngestionPipeline:
                 error_code=error.code,
             )
         self._record_parse_success(claimed, artifact)
+        if self._normalize_stage is None:
+            return PipelineResult(
+                PipelineDisposition.PARSED,
+                source=source,
+                parsed_artifact=artifact,
+            )
+        try:
+            normalized_artifact = self._normalize_stage.execute(artifact.document)
+        except ObjectStorageUnavailableError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="NORMALIZE",
+                code="NORMALIZED_ARTIFACT_UPLOAD_FAILED",
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                error_code="NORMALIZED_ARTIFACT_UPLOAD_FAILED",
+            )
+        except NormalizationError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.NORMALIZE_REJECTED,
+                parsed_artifact=artifact,
+                error_code=error.code,
+            )
+        self._record_normalization_success(claimed, normalized_artifact)
         return PipelineResult(
-            PipelineDisposition.PARSED,
+            PipelineDisposition.NORMALIZED,
             source=source,
             parsed_artifact=artifact,
+            normalized_artifact=normalized_artifact,
         )
 
     def _record_permanent_failure(
         self,
         claimed: ClaimedIngestionJob,
-        error: SourceValidationError | ParseError,
+        error: SourceValidationError | ParseError | NormalizationError,
     ) -> None:
         now = self._aware_now()
         with self._session_factory() as db, db.begin():
@@ -165,6 +205,7 @@ class IngestionPipeline:
         self,
         claimed: ClaimedIngestionJob,
         *,
+        stage: str,
         code: str,
         message: str,
     ) -> bool:
@@ -201,7 +242,7 @@ class IngestionPipeline:
 
             retry_scheduled = job.attempt_count < job.max_attempts
             attempt.status = "FAILED"
-            attempt.current_stage = "PARSE"
+            attempt.current_stage = stage
             attempt.heartbeat_at = now
             attempt.lease_expires_at = now
             attempt.finished_at = now
@@ -210,7 +251,7 @@ class IngestionPipeline:
             attempt.failure_message = message[:MAX_FAILURE_MESSAGE_LENGTH]
 
             job.status = "RETRY_SCHEDULED" if retry_scheduled else "FAILED"
-            job.current_stage = "PARSE"
+            job.current_stage = stage
             job.next_attempt_at = now if retry_scheduled else None
             job.claimed_by = None
             job.lease_expires_at = None
@@ -268,6 +309,52 @@ class IngestionPipeline:
             job.last_error_code = None
             job.updated_at = now
             attempt.current_stage = "NORMALIZE"
+            attempt.heartbeat_at = now
+
+    def _record_normalization_success(
+        self,
+        claimed: ClaimedIngestionJob,
+        artifact: NormalizedArtifact,
+    ) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            document.normalized_storage_object_key = artifact.object_key
+            document.normalized_storage_version = artifact.storage_version
+            document.failure_code = None
+            document.updated_at = now
+            job.current_stage = "CHUNK"
+            job.last_error_code = None
+            job.updated_at = now
+            attempt.current_stage = "CHUNK"
             attempt.heartbeat_at = now
 
     def _aware_now(self) -> datetime:

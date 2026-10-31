@@ -13,11 +13,13 @@ from backend.ingestion import (
     IngestionPipeline,
     IngestionRequestedMessage,
     IngestionWorker,
+    NormalizeStage,
     ParseStage,
     PipelineDisposition,
     SourceValidationError,
     SourceValidator,
 )
+from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import ParserRegistry, PlainTextParser
 from backend.models import (
     Base,
@@ -356,3 +358,157 @@ def test_worker_requeues_temporary_parsed_artifact_upload_failure(
         assert attempt.status == "FAILED"
         assert attempt.failure_class == "TRANSIENT"
         assert attempt.failure_code == "PARSED_ARTIFACT_UPLOAD_FAILED"
+
+
+def test_worker_normalizes_uploads_and_advances_to_chunk(ingestion_database):
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = "  Café\u00a0 value  ".encode()
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    expected_key = (
+        f"documents/{document.id}/normalized/123/deterministic-v1.json"
+    )
+    assert result.disposition is HandleDisposition.NORMALIZED
+    assert result.normalized_artifact is not None
+    assert result.normalized_artifact.object_key == expected_key
+    assert result.normalized_artifact.document.blocks[0].text == "Café value"
+    assert delivery.acknowledged is False
+    assert delivery.rejected_with is None
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_document.normalized_storage_object_key == expected_key
+        assert saved_document.normalized_storage_version == "1"
+        assert saved_job.current_stage == "CHUNK"
+        assert attempt.current_stage == "CHUNK"
+
+
+def test_worker_requeues_temporary_normalized_artifact_upload_failure(
+    ingestion_database,
+):
+    class NormalizedUploadUnavailableStorage(FakeObjectStorage):
+        def write_object(self, object_key, content, *, content_type):
+            if "/normalized/" in object_key:
+                raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+            return super().write_object(
+                object_key,
+                content,
+                content_type=content_type,
+            )
+
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = b"Retry normalization."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = NormalizedUploadUnavailableStorage(
+        provider="gcs",
+        bucket="documents",
+    )
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    storage.object_contents[document.storage_object_key] = content
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "NORMALIZED_ARTIFACT_UPLOAD_FAILED"
+    assert delivery.rejected_with is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.current_stage == "NORMALIZE"
+        assert attempt.current_stage == "NORMALIZE"
+        assert attempt.failure_code == "NORMALIZED_ARTIFACT_UPLOAD_FAILED"
+
+
+def test_worker_acknowledges_permanent_normalization_rejection(ingestion_database):
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = b"\x01"
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_NORMALIZE_REJECTED
+    assert result.reason == "NORMALIZE_NO_TEXT"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
+        assert saved_document.failure_code == "NORMALIZE_NO_TEXT"
