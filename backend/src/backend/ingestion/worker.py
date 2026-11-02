@@ -15,6 +15,7 @@ from backend.ingestion.pipeline import (
     PipelineDisposition,
 )
 from backend.ingestion.stages import (
+    ChunkedArtifact,
     NormalizedArtifact,
     ParsedArtifact,
     ValidatedSource,
@@ -32,9 +33,11 @@ class HandleDisposition(StrEnum):
     SOURCE_VALIDATED = "SOURCE_VALIDATED"
     PARSED = "PARSED"
     NORMALIZED = "NORMALIZED"
+    CHUNKED = "CHUNKED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
     ACKNOWLEDGED_NORMALIZE_REJECTED = "ACKNOWLEDGED_NORMALIZE_REJECTED"
+    ACKNOWLEDGED_CHUNK_REJECTED = "ACKNOWLEDGED_CHUNK_REJECTED"
     REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
@@ -48,6 +51,7 @@ class HandleResult:
     source: ValidatedSource | None = None
     parsed_artifact: ParsedArtifact | None = None
     normalized_artifact: NormalizedArtifact | None = None
+    chunked_artifact: ChunkedArtifact | None = None
     reason: str | None = None
 
 
@@ -106,6 +110,24 @@ class IngestionWorker:
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.CHUNK_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_CHUNK_REJECTED,
+                    claimed=result.claimed,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.CHUNKED:
+                return HandleResult(
+                    HandleDisposition.CHUNKED,
+                    claimed=result.claimed,
+                    source=pipeline_result.source,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
+                    chunked_artifact=pipeline_result.chunked_artifact,
                 )
             if pipeline_result.disposition is PipelineDisposition.NORMALIZED:
                 return HandleResult(

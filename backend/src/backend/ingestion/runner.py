@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.config import Settings
 from backend.database import create_database_engine
 from backend.ingestion import IngestionJobClaimer, IngestionPipeline, IngestionWorker
+from backend.ingestion.chunking import BlockAwareChunker
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import (
     MarkdownParser,
@@ -28,7 +29,12 @@ from backend.ingestion.parsing import (
     PlainTextParser,
 )
 from backend.ingestion.rabbitmq import RabbitMQIngestionConsumer
-from backend.ingestion.stages import NormalizeStage, ParseStage, SourceValidator
+from backend.ingestion.stages import (
+    ChunkStage,
+    NormalizeStage,
+    ParseStage,
+    SourceValidator,
+)
 from backend.logging import configure_logging
 from backend.object_storage.gcs import GCSObjectStorage
 
@@ -40,6 +46,10 @@ def create_worker_id() -> str:
 
 def build_parser_registry() -> ParserRegistry:
     return ParserRegistry([PdfParser(), MarkdownParser(), PlainTextParser()])
+
+
+def build_chunker() -> BlockAwareChunker:
+    return BlockAwareChunker()
 
 
 def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
@@ -61,6 +71,7 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
             SourceValidator(sessions, storage),
             ParseStage(registry, storage),
             NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(build_chunker(), storage),
         ),
     )
     return RabbitMQIngestionConsumer(settings, worker)
