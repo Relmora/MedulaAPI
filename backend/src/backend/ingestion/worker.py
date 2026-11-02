@@ -17,6 +17,7 @@ from backend.ingestion.pipeline import (
 from backend.ingestion.stages import (
     ChunkedArtifact,
     EmbeddedArtifact,
+    IndexedArtifact,
     NormalizedArtifact,
     ParsedArtifact,
     ValidatedSource,
@@ -36,11 +37,13 @@ class HandleDisposition(StrEnum):
     NORMALIZED = "NORMALIZED"
     CHUNKED = "CHUNKED"
     EMBEDDED = "EMBEDDED"
+    INDEXED = "INDEXED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
     ACKNOWLEDGED_NORMALIZE_REJECTED = "ACKNOWLEDGED_NORMALIZE_REJECTED"
     ACKNOWLEDGED_CHUNK_REJECTED = "ACKNOWLEDGED_CHUNK_REJECTED"
     ACKNOWLEDGED_EMBED_REJECTED = "ACKNOWLEDGED_EMBED_REJECTED"
+    ACKNOWLEDGED_INDEX_REJECTED = "ACKNOWLEDGED_INDEX_REJECTED"
     REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
@@ -56,6 +59,7 @@ class HandleResult:
     normalized_artifact: NormalizedArtifact | None = None
     chunked_artifact: ChunkedArtifact | None = None
     embedded_artifact: EmbeddedArtifact | None = None
+    indexed_artifact: IndexedArtifact | None = None
     reason: str | None = None
 
 
@@ -133,6 +137,28 @@ class IngestionWorker:
                     normalized_artifact=pipeline_result.normalized_artifact,
                     chunked_artifact=pipeline_result.chunked_artifact,
                     reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.INDEX_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_INDEX_REJECTED,
+                    claimed=result.claimed,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
+                    chunked_artifact=pipeline_result.chunked_artifact,
+                    embedded_artifact=pipeline_result.embedded_artifact,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.INDEXED:
+                return HandleResult(
+                    HandleDisposition.INDEXED,
+                    claimed=result.claimed,
+                    source=pipeline_result.source,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
+                    chunked_artifact=pipeline_result.chunked_artifact,
+                    embedded_artifact=pipeline_result.embedded_artifact,
+                    indexed_artifact=pipeline_result.indexed_artifact,
                 )
             if pipeline_result.disposition is PipelineDisposition.EMBEDDED:
                 return HandleResult(

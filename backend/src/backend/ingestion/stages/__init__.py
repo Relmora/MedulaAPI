@@ -2,6 +2,7 @@
 
 from backend.ingestion.stages.chunk_document import ChunkedArtifact, ChunkStage
 from backend.ingestion.stages.embed_document import EmbeddedArtifact, EmbedStage
+from backend.ingestion.stages.index_document import IndexedArtifact, IndexStage
 from backend.ingestion.stages.normalize_document import (
     NormalizedArtifact,
     NormalizeStage,
@@ -18,6 +19,8 @@ __all__ = [
     "ChunkedArtifact",
     "EmbedStage",
     "EmbeddedArtifact",
+    "IndexStage",
+    "IndexedArtifact",
     "NormalizedArtifact",
     "NormalizeStage",
     "ParseStage",

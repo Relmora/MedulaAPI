@@ -54,6 +54,7 @@ def test_default_embedding_settings():
     ("field", "value"),
     [
         ("embedding_dimensions", 0),
+        ("embedding_dimensions", 512),
         ("embedding_dimensions", 3073),
         ("embedding_batch_size", 0),
         ("embedding_batch_size", 251),
