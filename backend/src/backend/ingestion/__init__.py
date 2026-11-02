@@ -16,6 +16,8 @@ from backend.ingestion.pipeline import (
 from backend.ingestion.stages import (
     ChunkedArtifact,
     ChunkStage,
+    EmbeddedArtifact,
+    EmbedStage,
     NormalizedArtifact,
     NormalizeStage,
     ParsedArtifact,
@@ -29,6 +31,8 @@ from backend.ingestion.worker import HandleDisposition, HandleResult, IngestionW
 __all__ = [
     "ChunkStage",
     "ChunkedArtifact",
+    "EmbedStage",
+    "EmbeddedArtifact",
     "ClaimDisposition",
     "ClaimResult",
     "ClaimedIngestionJob",
