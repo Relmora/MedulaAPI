@@ -45,7 +45,7 @@ def test_production_embedder_uses_explicit_vertex_settings(monkeypatch):
         _env_file=None,
         gcp_project_id="project",
         embedding_model="embedding-model",
-        embedding_dimensions=512,
+        embedding_dimensions=768,
         embedding_batch_size=4,
         embedding_location="global",
         embedding_timeout_seconds=15,
@@ -55,13 +55,13 @@ def test_production_embedder_uses_explicit_vertex_settings(monkeypatch):
 
     assert embedder.configuration.provider == "vertex-ai"
     assert embedder.configuration.model == "embedding-model"
-    assert embedder.configuration.dimensions == 512
+    assert embedder.configuration.dimensions == 768
     assert embedder.configuration.batch_size == 4
     assert captured == {
         "project_id": "project",
         "location": "global",
         "model_name": "embedding-model",
-        "dimensions": 512,
+        "dimensions": 768,
         "timeout_seconds": 15.0,
     }
 

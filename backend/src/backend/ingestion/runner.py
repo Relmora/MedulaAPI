@@ -22,6 +22,7 @@ from backend.database import create_database_engine
 from backend.ingestion import IngestionJobClaimer, IngestionPipeline, IngestionWorker
 from backend.ingestion.chunking import BlockAwareChunker
 from backend.ingestion.embedding import DocumentEmbedder, VertexAIEmbeddingProvider
+from backend.ingestion.indexing import PgVectorIndex
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import (
     MarkdownParser,
@@ -33,6 +34,7 @@ from backend.ingestion.rabbitmq import RabbitMQIngestionConsumer
 from backend.ingestion.stages import (
     ChunkStage,
     EmbedStage,
+    IndexStage,
     NormalizeStage,
     ParseStage,
     SourceValidator,
@@ -88,6 +90,7 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
             NormalizeStage(DeterministicNormalizer(), storage),
             ChunkStage(build_chunker(), storage),
             EmbedStage(build_embedder(settings), storage),
+            IndexStage(PgVectorIndex(sessions), storage),
         ),
     )
     return RabbitMQIngestionConsumer(settings, worker)

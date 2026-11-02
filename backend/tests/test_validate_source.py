@@ -11,6 +11,7 @@ from backend.ingestion import (
     ChunkStage,
     EmbedStage,
     HandleDisposition,
+    IndexStage,
     IngestionJobClaimer,
     IngestionPipeline,
     IngestionRequestedMessage,
@@ -27,11 +28,17 @@ from backend.ingestion.embedding import (
     EmbeddingError,
     EmbeddingTransientError,
 )
+from backend.ingestion.indexing import (
+    IndexingError,
+    IndexingTransientError,
+    PgVectorIndex,
+)
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import ParserRegistry, PlainTextParser
 from backend.models import (
     Base,
     Document,
+    IndexedChunk,
     IngestionJob,
     IngestionJobAttempt,
     KnowledgeBase,
@@ -197,6 +204,43 @@ def full_embedding_worker(factory, now, storage, provider):
             NormalizeStage(DeterministicNormalizer(), storage),
             ChunkStage(BlockAwareChunker(), storage),
             EmbedStage(DocumentEmbedder(provider, batch_size=2), storage),
+            clock=lambda: now,
+        ),
+    )
+
+
+class PipelineIndexingProvider(PipelineEmbeddingProvider):
+    dimensions = 768
+
+    def embed(self, texts):
+        if self.error is not None:
+            raise self.error
+        return tuple((float(len(text)), 1.0, *([0.5] * 766)) for text in texts)
+
+
+class FailingVectorIndex:
+    def __init__(self, error):
+        self.error = error
+
+    def replace_document(self, document):
+        raise self.error
+
+
+def full_indexing_worker(factory, now, storage, *, vector_index=None):
+    return IngestionWorker(
+        IngestionJobClaimer(factory, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            factory,
+            SourceValidator(factory, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            EmbedStage(
+                DocumentEmbedder(PipelineIndexingProvider(), batch_size=2),
+                storage,
+            ),
+            IndexStage(vector_index or PgVectorIndex(factory), storage),
             clock=lambda: now,
         ),
     )
@@ -564,6 +608,142 @@ def test_worker_embeds_uploads_and_advances_to_index(ingestion_database):
         assert saved_document.embedded_storage_version == "1"
         assert saved_job.current_stage == "INDEX"
         assert attempt.current_stage == "INDEX"
+
+
+def test_worker_indexes_chunks_and_advances_to_relation_extraction(
+    ingestion_database,
+):
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    content = b"First paragraph.\n\nSecond paragraph for vector indexing."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_indexing_worker(ingestion_database, now, storage)
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.INDEXED
+    assert result.indexed_artifact is not None
+    assert result.indexed_artifact.document_id == document.id
+    assert result.indexed_artifact.chunk_count == 1
+    assert delivery.acknowledged is False
+    assert delivery.rejected_with is None
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        indexed = db.scalar(
+            select(IndexedChunk).where(IndexedChunk.document_id == document.id)
+        )
+        assert saved_job.current_stage == "RELATION_EXTRACT"
+        assert attempt.current_stage == "RELATION_EXTRACT"
+        assert indexed.chunk_text == content.decode()
+        assert indexed.embedding_dimensions == 768
+        assert len(indexed.embedding) == 768
+
+
+def test_worker_requeues_transient_index_failure(ingestion_database):
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    content = b"Retry vector indexing."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_indexing_worker(
+        ingestion_database,
+        now,
+        storage,
+        vector_index=FailingVectorIndex(
+            IndexingTransientError(
+                "INDEX_DATABASE_UNAVAILABLE",
+                "The vector index is temporarily unavailable.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "INDEX_DATABASE_UNAVAILABLE"
+    assert delivery.rejected_with is True
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "RETRY_SCHEDULED"
+        assert saved_job.current_stage == "INDEX"
+        assert attempt.current_stage == "INDEX"
+        assert attempt.failure_class == "TRANSIENT"
+
+
+def test_worker_requeues_temporary_index_source_download_failure(
+    ingestion_database,
+):
+    class IndexReadUnavailableStorage(FakeObjectStorage):
+        def read_object(self, object_key, *, version=None):
+            if "/embedded/" in object_key:
+                raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+            return super().read_object(object_key, version=version)
+
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    content = b"Retry vector-index source download."
+    storage = IndexReadUnavailableStorage(provider="gcs", bucket="documents")
+    document, job, storage = add_text_job(
+        ingestion_database,
+        now,
+        content,
+        storage=storage,
+    )
+    worker = full_indexing_worker(ingestion_database, now, storage)
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "INDEX_SOURCE_ARTIFACT_UNAVAILABLE"
+    assert delivery.rejected_with is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.current_stage == "INDEX"
+        assert attempt.current_stage == "INDEX"
+        assert attempt.failure_code == "INDEX_SOURCE_ARTIFACT_UNAVAILABLE"
+
+
+def test_worker_acknowledges_permanent_index_rejection(ingestion_database):
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    content = b"Reject vector indexing."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_indexing_worker(
+        ingestion_database,
+        now,
+        storage,
+        vector_index=FailingVectorIndex(
+            IndexingError(
+                "INDEX_PROVENANCE_MISMATCH",
+                "The indexing provenance is invalid.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_INDEX_REJECTED
+    assert result.reason == "INDEX_PROVENANCE_MISMATCH"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
+        assert saved_document.failure_code == "INDEX_PROVENANCE_MISMATCH"
+        assert attempt.failure_class == "PERMANENT"
 
 
 def test_worker_requeues_transient_embedding_provider_failure(ingestion_database):
