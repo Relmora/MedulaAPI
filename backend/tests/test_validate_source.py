@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
+    ChunkStage,
     HandleDisposition,
     IngestionJobClaimer,
     IngestionPipeline,
@@ -19,6 +20,7 @@ from backend.ingestion import (
     SourceValidationError,
     SourceValidator,
 )
+from backend.ingestion.chunking import BlockAwareChunker, ChunkingError
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import ParserRegistry, PlainTextParser
 from backend.models import (
@@ -408,6 +410,185 @@ def test_worker_normalizes_uploads_and_advances_to_chunk(ingestion_database):
         assert saved_document.normalized_storage_version == "1"
         assert saved_job.current_stage == "CHUNK"
         assert attempt.current_stage == "CHUNK"
+
+
+def test_worker_chunks_uploads_and_advances_to_embed(ingestion_database):
+    now = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
+    content = b"First paragraph.\n\nSecond paragraph for chunking."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.CHUNKED
+    assert result.chunked_artifact is not None
+    assert result.chunked_artifact.object_key.startswith(
+        f"documents/{document.id}/chunked/1/block-aware-v1-"
+    )
+    assert result.chunked_artifact.document.chunks[0].text == (
+        "First paragraph.\n\nSecond paragraph for chunking."
+    )
+    assert delivery.acknowledged is False
+    assert delivery.rejected_with is None
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert (
+            saved_document.chunked_storage_object_key
+            == result.chunked_artifact.object_key
+        )
+        assert saved_document.chunked_storage_version == "1"
+        assert saved_job.current_stage == "EMBED"
+        assert attempt.current_stage == "EMBED"
+
+
+def test_worker_requeues_temporary_chunked_artifact_upload_failure(
+    ingestion_database,
+):
+    class ChunkedUploadUnavailableStorage(FakeObjectStorage):
+        def write_object(self, object_key, content, *, content_type):
+            if "/chunked/" in object_key:
+                raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+            return super().write_object(
+                object_key,
+                content,
+                content_type=content_type,
+            )
+
+    now = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
+    content = b"Retry chunking."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = ChunkedUploadUnavailableStorage(provider="gcs", bucket="documents")
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    storage.object_contents[document.storage_object_key] = content
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "CHUNKED_ARTIFACT_UPLOAD_FAILED"
+    assert delivery.rejected_with is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.current_stage == "CHUNK"
+        assert attempt.current_stage == "CHUNK"
+        assert attempt.failure_code == "CHUNKED_ARTIFACT_UPLOAD_FAILED"
+
+
+def test_worker_acknowledges_permanent_chunking_rejection(ingestion_database):
+    class RejectingChunker:
+        @property
+        def name(self):
+            return "rejecting"
+
+        @property
+        def version(self):
+            return "1"
+
+        def chunk(
+            self,
+            document,
+            *,
+            source_object_key,
+            source_storage_version,
+        ):
+            raise ChunkingError(
+                "CHUNK_PROVENANCE_INVALID",
+                "Normalized provenance is invalid.",
+            )
+
+    now = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
+    content = b"Reject chunking."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(RejectingChunker(), storage),
+            clock=lambda: now,
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_CHUNK_REJECTED
+    assert result.reason == "CHUNK_PROVENANCE_INVALID"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
+        assert saved_document.failure_code == "CHUNK_PROVENANCE_INVALID"
 
 
 def test_worker_requeues_temporary_normalized_artifact_upload_failure(

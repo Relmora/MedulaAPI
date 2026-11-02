@@ -7,10 +7,13 @@ from enum import StrEnum
 
 from sqlalchemy import select
 
+from backend.ingestion.chunking import ChunkingError
 from backend.ingestion.claim import ClaimedIngestionJob, SessionFactory
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
 from backend.ingestion.stages import (
+    ChunkedArtifact,
+    ChunkStage,
     NormalizedArtifact,
     NormalizeStage,
     ParsedArtifact,
@@ -33,6 +36,8 @@ class PipelineDisposition(StrEnum):
     PARSE_REJECTED = "PARSE_REJECTED"
     NORMALIZED = "NORMALIZED"
     NORMALIZE_REJECTED = "NORMALIZE_REJECTED"
+    CHUNKED = "CHUNKED"
+    CHUNK_REJECTED = "CHUNK_REJECTED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
@@ -43,6 +48,7 @@ class PipelineResult:
     source: ValidatedSource | None = None
     parsed_artifact: ParsedArtifact | None = None
     normalized_artifact: NormalizedArtifact | None = None
+    chunked_artifact: ChunkedArtifact | None = None
     error_code: str | None = None
 
 
@@ -63,6 +69,7 @@ class IngestionPipeline:
         source_validator: SourceValidator,
         parse_stage: ParseStage | None = None,
         normalize_stage: NormalizeStage | None = None,
+        chunk_stage: ChunkStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
@@ -70,6 +77,7 @@ class IngestionPipeline:
         self._source_validator = source_validator
         self._parse_stage = parse_stage
         self._normalize_stage = normalize_stage
+        self._chunk_stage = chunk_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
@@ -138,17 +146,51 @@ class IngestionPipeline:
                 error_code=error.code,
             )
         self._record_normalization_success(claimed, normalized_artifact)
+        if self._chunk_stage is None:
+            return PipelineResult(
+                PipelineDisposition.NORMALIZED,
+                source=source,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+            )
+        try:
+            chunked_artifact = self._chunk_stage.execute(normalized_artifact)
+        except ObjectStorageUnavailableError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="CHUNK",
+                code="CHUNKED_ARTIFACT_UPLOAD_FAILED",
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                error_code="CHUNKED_ARTIFACT_UPLOAD_FAILED",
+            )
+        except ChunkingError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.CHUNK_REJECTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                error_code=error.code,
+            )
+        self._record_chunk_success(claimed, chunked_artifact)
         return PipelineResult(
-            PipelineDisposition.NORMALIZED,
+            PipelineDisposition.CHUNKED,
             source=source,
             parsed_artifact=artifact,
             normalized_artifact=normalized_artifact,
+            chunked_artifact=chunked_artifact,
         )
 
     def _record_permanent_failure(
         self,
         claimed: ClaimedIngestionJob,
-        error: SourceValidationError | ParseError | NormalizationError,
+        error: SourceValidationError | ParseError | NormalizationError | ChunkingError,
     ) -> None:
         now = self._aware_now()
         with self._session_factory() as db, db.begin():
@@ -362,3 +404,49 @@ class IngestionPipeline:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("clock must return a timezone-aware datetime")
         return now
+
+    def _record_chunk_success(
+        self,
+        claimed: ClaimedIngestionJob,
+        artifact: ChunkedArtifact,
+    ) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            document.chunked_storage_object_key = artifact.object_key
+            document.chunked_storage_version = artifact.storage_version
+            document.failure_code = None
+            document.updated_at = now
+            job.current_stage = "EMBED"
+            job.last_error_code = None
+            job.updated_at = now
+            attempt.current_stage = "EMBED"
+            attempt.heartbeat_at = now
