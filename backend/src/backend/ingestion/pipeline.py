@@ -9,11 +9,14 @@ from sqlalchemy import select
 
 from backend.ingestion.chunking import ChunkingError
 from backend.ingestion.claim import ClaimedIngestionJob, SessionFactory
+from backend.ingestion.embedding import EmbeddingError, EmbeddingTransientError
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
 from backend.ingestion.stages import (
     ChunkedArtifact,
     ChunkStage,
+    EmbeddedArtifact,
+    EmbedStage,
     NormalizedArtifact,
     NormalizeStage,
     ParsedArtifact,
@@ -38,6 +41,8 @@ class PipelineDisposition(StrEnum):
     NORMALIZE_REJECTED = "NORMALIZE_REJECTED"
     CHUNKED = "CHUNKED"
     CHUNK_REJECTED = "CHUNK_REJECTED"
+    EMBEDDED = "EMBEDDED"
+    EMBED_REJECTED = "EMBED_REJECTED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
@@ -49,6 +54,7 @@ class PipelineResult:
     parsed_artifact: ParsedArtifact | None = None
     normalized_artifact: NormalizedArtifact | None = None
     chunked_artifact: ChunkedArtifact | None = None
+    embedded_artifact: EmbeddedArtifact | None = None
     error_code: str | None = None
 
 
@@ -70,6 +76,7 @@ class IngestionPipeline:
         parse_stage: ParseStage | None = None,
         normalize_stage: NormalizeStage | None = None,
         chunk_stage: ChunkStage | None = None,
+        embed_stage: EmbedStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
@@ -78,6 +85,7 @@ class IngestionPipeline:
         self._parse_stage = parse_stage
         self._normalize_stage = normalize_stage
         self._chunk_stage = chunk_stage
+        self._embed_stage = embed_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
@@ -179,18 +187,77 @@ class IngestionPipeline:
                 error_code=error.code,
             )
         self._record_chunk_success(claimed, chunked_artifact)
+        if self._embed_stage is None:
+            return PipelineResult(
+                PipelineDisposition.CHUNKED,
+                source=source,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+            )
+        try:
+            embedded_artifact = self._embed_stage.execute(chunked_artifact)
+        except ObjectStorageUnavailableError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="EMBED",
+                code="EMBEDDED_ARTIFACT_UPLOAD_FAILED",
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                error_code="EMBEDDED_ARTIFACT_UPLOAD_FAILED",
+            )
+        except EmbeddingTransientError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="EMBED",
+                code=error.code,
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                error_code=error.code,
+            )
+        except EmbeddingError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.EMBED_REJECTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                error_code=error.code,
+            )
+        self._record_embedding_success(claimed, embedded_artifact)
         return PipelineResult(
-            PipelineDisposition.CHUNKED,
+            PipelineDisposition.EMBEDDED,
             source=source,
             parsed_artifact=artifact,
             normalized_artifact=normalized_artifact,
             chunked_artifact=chunked_artifact,
+            embedded_artifact=embedded_artifact,
         )
 
     def _record_permanent_failure(
         self,
         claimed: ClaimedIngestionJob,
-        error: SourceValidationError | ParseError | NormalizationError | ChunkingError,
+        error: (
+            SourceValidationError
+            | ParseError
+            | NormalizationError
+            | ChunkingError
+            | EmbeddingError
+        ),
     ) -> None:
         now = self._aware_now()
         with self._session_factory() as db, db.begin():
@@ -449,4 +516,50 @@ class IngestionPipeline:
             job.last_error_code = None
             job.updated_at = now
             attempt.current_stage = "EMBED"
+            attempt.heartbeat_at = now
+
+    def _record_embedding_success(
+        self,
+        claimed: ClaimedIngestionJob,
+        artifact: EmbeddedArtifact,
+    ) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            document.embedded_storage_object_key = artifact.object_key
+            document.embedded_storage_version = artifact.storage_version
+            document.failure_code = None
+            document.updated_at = now
+            job.current_stage = "INDEX"
+            job.last_error_code = None
+            job.updated_at = now
+            attempt.current_stage = "INDEX"
             attempt.heartbeat_at = now

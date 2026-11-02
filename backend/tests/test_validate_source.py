@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
     ChunkStage,
+    EmbedStage,
     HandleDisposition,
     IngestionJobClaimer,
     IngestionPipeline,
@@ -21,6 +22,11 @@ from backend.ingestion import (
     SourceValidator,
 )
 from backend.ingestion.chunking import BlockAwareChunker, ChunkingError
+from backend.ingestion.embedding import (
+    DocumentEmbedder,
+    EmbeddingError,
+    EmbeddingTransientError,
+)
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import ParserRegistry, PlainTextParser
 from backend.models import (
@@ -126,6 +132,24 @@ def configured_storage(document: Document, content: bytes) -> FakeObjectStorage:
     return storage
 
 
+def add_text_job(factory, now, content, *, storage=None):
+    document, job = add_queued_job(factory, now, size=len(content))
+    with factory() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+    storage = storage or configured_storage(document, content)
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    storage.object_contents[document.storage_object_key] = content
+    return document, job, storage
+
+
 def claim(factory, document, job, now):
     incoming = IngestionRequestedMessage.from_body(envelope(job, document))
     result = IngestionJobClaimer(factory, clock=lambda: now).claim(
@@ -146,6 +170,36 @@ class RecordingDelivery:
 
     def reject(self, *, requeue: bool) -> None:
         self.rejected_with = requeue
+
+
+class PipelineEmbeddingProvider:
+    provider_name = "fake"
+    model_name = "fake-embedding-v1"
+    dimensions = 3
+
+    def __init__(self, error=None):
+        self.error = error
+
+    def embed(self, texts):
+        if self.error is not None:
+            raise self.error
+        return tuple((float(len(text)), 1.0, 0.5) for text in texts)
+
+
+def full_embedding_worker(factory, now, storage, provider):
+    return IngestionWorker(
+        IngestionJobClaimer(factory, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            factory,
+            SourceValidator(factory, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            EmbedStage(DocumentEmbedder(provider, batch_size=2), storage),
+            clock=lambda: now,
+        ),
+    )
 
 
 def test_validate_source_downloads_the_claimed_immutable_object(ingestion_database):
@@ -467,6 +521,165 @@ def test_worker_chunks_uploads_and_advances_to_embed(ingestion_database):
         assert saved_document.chunked_storage_version == "1"
         assert saved_job.current_stage == "EMBED"
         assert attempt.current_stage == "EMBED"
+
+
+def test_worker_embeds_uploads_and_advances_to_index(ingestion_database):
+    now = datetime(2026, 11, 2, 11, 0, tzinfo=UTC)
+    content = b"First paragraph.\n\nSecond paragraph for embedding."
+    document, job, storage = add_text_job(
+        ingestion_database,
+        now,
+        content,
+    )
+    worker = full_embedding_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineEmbeddingProvider(),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.EMBEDDED
+    assert result.embedded_artifact is not None
+    assert result.embedded_artifact.object_key.startswith(
+        f"documents/{document.id}/embedded/1/fake-fake-embedding-v1-"
+    )
+    assert len(result.embedded_artifact.document.embeddings) == len(
+        result.chunked_artifact.document.chunks
+    )
+    assert delivery.acknowledged is False
+    assert delivery.rejected_with is None
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert (
+            saved_document.embedded_storage_object_key
+            == result.embedded_artifact.object_key
+        )
+        assert saved_document.embedded_storage_version == "1"
+        assert saved_job.current_stage == "INDEX"
+        assert attempt.current_stage == "INDEX"
+
+
+def test_worker_requeues_transient_embedding_provider_failure(ingestion_database):
+    now = datetime(2026, 11, 2, 11, 0, tzinfo=UTC)
+    content = b"Retry embedding."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_embedding_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineEmbeddingProvider(
+            EmbeddingTransientError(
+                "EMBED_PROVIDER_RATE_LIMITED",
+                "The embedding provider rate limit was reached.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "EMBED_PROVIDER_RATE_LIMITED"
+    assert delivery.rejected_with is True
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "RETRY_SCHEDULED"
+        assert saved_job.current_stage == "EMBED"
+        assert attempt.current_stage == "EMBED"
+        assert attempt.failure_class == "TRANSIENT"
+        assert attempt.failure_code == "EMBED_PROVIDER_RATE_LIMITED"
+
+
+def test_worker_acknowledges_permanent_embedding_rejection(ingestion_database):
+    now = datetime(2026, 11, 2, 11, 0, tzinfo=UTC)
+    content = b"Reject embedding."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_embedding_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineEmbeddingProvider(
+            EmbeddingError(
+                "EMBED_PROVIDER_OUTPUT_INVALID",
+                "The embedding provider returned malformed output.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_EMBED_REJECTED
+    assert result.reason == "EMBED_PROVIDER_OUTPUT_INVALID"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
+        assert saved_document.failure_code == "EMBED_PROVIDER_OUTPUT_INVALID"
+        assert attempt.failure_class == "PERMANENT"
+
+
+def test_worker_requeues_temporary_embedded_artifact_upload_failure(
+    ingestion_database,
+):
+    class EmbeddedUploadUnavailableStorage(FakeObjectStorage):
+        def write_object(self, object_key, content, *, content_type):
+            if "/embedded/" in object_key:
+                raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+            return super().write_object(
+                object_key,
+                content,
+                content_type=content_type,
+            )
+
+    now = datetime(2026, 11, 2, 11, 0, tzinfo=UTC)
+    content = b"Retry embedded artifact upload."
+    storage = EmbeddedUploadUnavailableStorage(provider="gcs", bucket="documents")
+    document, job, storage = add_text_job(
+        ingestion_database,
+        now,
+        content,
+        storage=storage,
+    )
+    worker = full_embedding_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineEmbeddingProvider(),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "EMBEDDED_ARTIFACT_UPLOAD_FAILED"
+    assert delivery.rejected_with is True
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.current_stage == "EMBED"
+        assert attempt.current_stage == "EMBED"
+        assert attempt.failure_class == "TRANSIENT"
+        assert attempt.failure_code == "EMBEDDED_ARTIFACT_UPLOAD_FAILED"
 
 
 def test_worker_requeues_temporary_chunked_artifact_upload_failure(

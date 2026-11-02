@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     storage_bucket: str = ""
     gcp_project_id: str | None = None
 
+    embedding_provider: Literal["vertex_ai"] = "vertex_ai"
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimensions: int = Field(default=768, gt=0, le=3072)
+    embedding_batch_size: int = Field(default=1, gt=0, le=250)
+    embedding_location: str = "global"
+    embedding_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+
     db_host: str = "::1"
     db_port: int = 5432
     db_name: str = "MedullaAPI"

@@ -21,6 +21,7 @@ from backend.config import Settings
 from backend.database import create_database_engine
 from backend.ingestion import IngestionJobClaimer, IngestionPipeline, IngestionWorker
 from backend.ingestion.chunking import BlockAwareChunker
+from backend.ingestion.embedding import DocumentEmbedder, VertexAIEmbeddingProvider
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import (
     MarkdownParser,
@@ -31,6 +32,7 @@ from backend.ingestion.parsing import (
 from backend.ingestion.rabbitmq import RabbitMQIngestionConsumer
 from backend.ingestion.stages import (
     ChunkStage,
+    EmbedStage,
     NormalizeStage,
     ParseStage,
     SourceValidator,
@@ -50,6 +52,19 @@ def build_parser_registry() -> ParserRegistry:
 
 def build_chunker() -> BlockAwareChunker:
     return BlockAwareChunker()
+
+
+def build_embedder(settings: Settings) -> DocumentEmbedder:
+    if not settings.gcp_project_id or not settings.gcp_project_id.strip():
+        raise ValueError("GCP_PROJECT_ID must be configured for Vertex AI embeddings")
+    provider = VertexAIEmbeddingProvider(
+        project_id=settings.gcp_project_id,
+        location=settings.embedding_location,
+        model_name=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+        timeout_seconds=settings.embedding_timeout_seconds,
+    )
+    return DocumentEmbedder(provider, batch_size=settings.embedding_batch_size)
 
 
 def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
@@ -72,6 +87,7 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
             ParseStage(registry, storage),
             NormalizeStage(DeterministicNormalizer(), storage),
             ChunkStage(build_chunker(), storage),
+            EmbedStage(build_embedder(settings), storage),
         ),
     )
     return RabbitMQIngestionConsumer(settings, worker)
