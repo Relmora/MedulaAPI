@@ -19,6 +19,7 @@ from backend.ingestion import (
     NormalizeStage,
     ParseStage,
     PipelineDisposition,
+    RelationExtractStage,
     SourceValidationError,
     SourceValidator,
 )
@@ -35,6 +36,14 @@ from backend.ingestion.indexing import (
 )
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import ParserRegistry, PlainTextParser
+from backend.ingestion.relation_extraction import (
+    CandidateChunkExtraction,
+    CandidateEntity,
+    CandidateRelation,
+    DocumentRelationExtractor,
+    RelationExtractionError,
+    RelationExtractionTransientError,
+)
 from backend.models import (
     Base,
     Document,
@@ -241,6 +250,54 @@ def full_indexing_worker(factory, now, storage, *, vector_index=None):
                 storage,
             ),
             IndexStage(vector_index or PgVectorIndex(factory), storage),
+            clock=lambda: now,
+        ),
+    )
+
+
+class PipelineRelationProvider:
+    provider_name = "fake"
+    model_name = "fake-relations-v1"
+
+    def __init__(self, error=None):
+        self.error = error
+
+    def extract(self, text, *, allowed_entity_types, allowed_relation_types):
+        if self.error is not None:
+            raise self.error
+        return CandidateChunkExtraction(
+            entities=(
+                CandidateEntity(name="Sanjay", type="PERSON"),
+                CandidateEntity(name="MedulaAPI", type="PROJECT"),
+            ),
+            relations=(
+                CandidateRelation(
+                    source_entity_index=0,
+                    target_entity_index=1,
+                    type="CREATED",
+                    evidence="Sanjay created MedulaAPI",
+                    confidence=0.98,
+                ),
+            ),
+        )
+
+
+def full_relation_worker(factory, now, storage, provider):
+    return IngestionWorker(
+        IngestionJobClaimer(factory, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            factory,
+            SourceValidator(factory, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            EmbedStage(
+                DocumentEmbedder(PipelineIndexingProvider(), batch_size=2),
+                storage,
+            ),
+            IndexStage(PgVectorIndex(factory), storage),
+            RelationExtractStage(DocumentRelationExtractor(provider), storage),
             clock=lambda: now,
         ),
     )
@@ -640,6 +697,112 @@ def test_worker_indexes_chunks_and_advances_to_relation_extraction(
         assert indexed.chunk_text == content.decode()
         assert indexed.embedding_dimensions == 768
         assert len(indexed.embedding) == 768
+
+
+def test_worker_extracts_relations_and_advances_to_graph_store(ingestion_database):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_relation_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.RELATIONS_EXTRACTED
+    assert result.relations_artifact is not None
+    assert result.relations_artifact.document.document_id == document.id
+    assert result.relations_artifact.document.statistics.relation_count == 1
+    assert delivery.acknowledged is False
+    assert delivery.rejected_with is None
+    stored = json.loads(
+        storage.object_contents[result.relations_artifact.object_key]
+    )
+    assert stored["chunks"][0]["relations"][0]["type"] == "CREATED"
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_document.relations_storage_object_key == (
+            result.relations_artifact.object_key
+        )
+        assert saved_document.relations_storage_version == "1"
+        assert saved_job.current_stage == "GRAPH_STORE"
+        assert attempt.current_stage == "GRAPH_STORE"
+
+
+def test_worker_requeues_transient_relation_provider_failure(ingestion_database):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_relation_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(
+            RelationExtractionTransientError(
+                "RELATION_PROVIDER_UNAVAILABLE",
+                "The relation provider is temporarily unavailable.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "RELATION_PROVIDER_UNAVAILABLE"
+    assert delivery.rejected_with is True
+    assert delivery.acknowledged is False
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "RETRY_SCHEDULED"
+        assert saved_job.current_stage == "RELATION_EXTRACT"
+        assert attempt.current_stage == "RELATION_EXTRACT"
+        assert saved_document.relations_storage_object_key is None
+
+
+def test_worker_records_permanent_relation_failure_before_acknowledging(
+    ingestion_database,
+):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_relation_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(
+            RelationExtractionError(
+                "RELATION_PROVIDER_OUTPUT_INVALID",
+                "The relation provider returned malformed output.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is (
+        HandleDisposition.ACKNOWLEDGED_RELATION_EXTRACT_REJECTED
+    )
+    assert result.reason == "RELATION_PROVIDER_OUTPUT_INVALID"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
 
 
 def test_worker_requeues_transient_index_failure(ingestion_database):

@@ -118,6 +118,12 @@ class Document(Base):
     embedded_storage_version: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
+    relations_storage_object_key: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True
+    )
+    relations_storage_version: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     upload_status: Mapped[str] = mapped_column(
         String(32), default="PENDING", server_default="PENDING"
     )

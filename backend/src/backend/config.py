@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     embedding_location: str = "global"
     embedding_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
 
+    relation_extraction_provider: Literal["vertex_ai"] = "vertex_ai"
+    relation_extraction_model: str = "gemini-2.5-flash"
+    relation_extraction_location: str = "global"
+    relation_extraction_timeout_seconds: float = Field(
+        default=60.0, gt=0, le=600
+    )
+
     db_host: str = "::1"
     db_port: int = 5432
     db_name: str = "MedullaAPI"

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.ingestion.chunking.interface import ChunkingError
-
 from backend.ingestion.chunking.models import (
     ChunkedDocument,
     ChunkingConfig,

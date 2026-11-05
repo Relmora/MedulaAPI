@@ -2,6 +2,10 @@
 
 from backend.ingestion.stages.chunk_document import ChunkedArtifact, ChunkStage
 from backend.ingestion.stages.embed_document import EmbeddedArtifact, EmbedStage
+from backend.ingestion.stages.extract_relations import (
+    RelationExtractStage,
+    RelationsArtifact,
+)
 from backend.ingestion.stages.index_document import IndexedArtifact, IndexStage
 from backend.ingestion.stages.normalize_document import (
     NormalizedArtifact,
@@ -25,6 +29,8 @@ __all__ = [
     "NormalizeStage",
     "ParseStage",
     "ParsedArtifact",
+    "RelationExtractStage",
+    "RelationsArtifact",
     "SourceValidationError",
     "SourceValidator",
     "ValidatedSource",
