@@ -719,9 +719,7 @@ def test_worker_extracts_relations_and_advances_to_graph_store(ingestion_databas
     assert result.relations_artifact.document.statistics.relation_count == 1
     assert delivery.acknowledged is False
     assert delivery.rejected_with is None
-    stored = json.loads(
-        storage.object_contents[result.relations_artifact.object_key]
-    )
+    stored = json.loads(storage.object_contents[result.relations_artifact.object_key])
     assert stored["chunks"][0]["relations"][0]["type"] == "CREATED"
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)

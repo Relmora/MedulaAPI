@@ -46,9 +46,7 @@ class HandleDisposition(StrEnum):
     ACKNOWLEDGED_CHUNK_REJECTED = "ACKNOWLEDGED_CHUNK_REJECTED"
     ACKNOWLEDGED_EMBED_REJECTED = "ACKNOWLEDGED_EMBED_REJECTED"
     ACKNOWLEDGED_INDEX_REJECTED = "ACKNOWLEDGED_INDEX_REJECTED"
-    ACKNOWLEDGED_RELATION_EXTRACT_REJECTED = (
-        "ACKNOWLEDGED_RELATION_EXTRACT_REJECTED"
-    )
+    ACKNOWLEDGED_RELATION_EXTRACT_REJECTED = "ACKNOWLEDGED_RELATION_EXTRACT_REJECTED"
     REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
@@ -170,10 +168,7 @@ class IngestionWorker:
                     indexed_artifact=pipeline_result.indexed_artifact,
                     reason=pipeline_result.error_code,
                 )
-            if (
-                pipeline_result.disposition
-                is PipelineDisposition.RELATIONS_EXTRACTED
-            ):
+            if pipeline_result.disposition is PipelineDisposition.RELATIONS_EXTRACTED:
                 return HandleResult(
                     HandleDisposition.RELATIONS_EXTRACTED,
                     claimed=result.claimed,
