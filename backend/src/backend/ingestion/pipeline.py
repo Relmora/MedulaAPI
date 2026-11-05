@@ -13,6 +13,10 @@ from backend.ingestion.embedding import EmbeddingError, EmbeddingTransientError
 from backend.ingestion.indexing import IndexingError, IndexingTransientError
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
+from backend.ingestion.relation_extraction import (
+    RelationExtractionError,
+    RelationExtractionTransientError,
+)
 from backend.ingestion.stages import (
     ChunkedArtifact,
     ChunkStage,
@@ -24,6 +28,8 @@ from backend.ingestion.stages import (
     NormalizeStage,
     ParsedArtifact,
     ParseStage,
+    RelationExtractStage,
+    RelationsArtifact,
     SourceValidationError,
     SourceValidator,
     ValidatedSource,
@@ -48,6 +54,8 @@ class PipelineDisposition(StrEnum):
     EMBED_REJECTED = "EMBED_REJECTED"
     INDEXED = "INDEXED"
     INDEX_REJECTED = "INDEX_REJECTED"
+    RELATIONS_EXTRACTED = "RELATIONS_EXTRACTED"
+    RELATION_EXTRACT_REJECTED = "RELATION_EXTRACT_REJECTED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
@@ -61,6 +69,7 @@ class PipelineResult:
     chunked_artifact: ChunkedArtifact | None = None
     embedded_artifact: EmbeddedArtifact | None = None
     indexed_artifact: IndexedArtifact | None = None
+    relations_artifact: RelationsArtifact | None = None
     error_code: str | None = None
 
 
@@ -84,6 +93,7 @@ class IngestionPipeline:
         chunk_stage: ChunkStage | None = None,
         embed_stage: EmbedStage | None = None,
         index_stage: IndexStage | None = None,
+        relation_extract_stage: RelationExtractStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
@@ -94,6 +104,7 @@ class IngestionPipeline:
         self._chunk_stage = chunk_stage
         self._embed_stage = embed_stage
         self._index_stage = index_stage
+        self._relation_extract_stage = relation_extract_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
@@ -303,14 +314,78 @@ class IngestionPipeline:
                 error_code=error.code,
             )
         self._record_indexing_success(claimed)
+        if self._relation_extract_stage is None:
+            return PipelineResult(
+                PipelineDisposition.INDEXED,
+                source=source,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                embedded_artifact=embedded_artifact,
+                indexed_artifact=indexed_artifact,
+            )
+        try:
+            relations_artifact = self._relation_extract_stage.execute(
+                indexed_artifact,
+                chunked_artifact,
+            )
+        except ObjectStorageUnavailableError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="RELATION_EXTRACT",
+                code="RELATION_STORAGE_UNAVAILABLE",
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                embedded_artifact=embedded_artifact,
+                indexed_artifact=indexed_artifact,
+                error_code="RELATION_STORAGE_UNAVAILABLE",
+            )
+        except RelationExtractionTransientError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="RELATION_EXTRACT",
+                code=error.code,
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                embedded_artifact=embedded_artifact,
+                indexed_artifact=indexed_artifact,
+                error_code=error.code,
+            )
+        except RelationExtractionError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.RELATION_EXTRACT_REJECTED,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                embedded_artifact=embedded_artifact,
+                indexed_artifact=indexed_artifact,
+                error_code=error.code,
+            )
+        self._record_relation_extraction_success(claimed, relations_artifact)
         return PipelineResult(
-            PipelineDisposition.INDEXED,
+            PipelineDisposition.RELATIONS_EXTRACTED,
             source=source,
             parsed_artifact=artifact,
             normalized_artifact=normalized_artifact,
             chunked_artifact=chunked_artifact,
             embedded_artifact=embedded_artifact,
             indexed_artifact=indexed_artifact,
+            relations_artifact=relations_artifact,
         )
 
     def _record_permanent_failure(
@@ -323,6 +398,7 @@ class IngestionPipeline:
             | ChunkingError
             | EmbeddingError
             | IndexingError
+            | RelationExtractionError
         ),
     ) -> None:
         now = self._aware_now()
@@ -668,4 +744,50 @@ class IngestionPipeline:
             job.last_error_code = None
             job.updated_at = now
             attempt.current_stage = "RELATION_EXTRACT"
+            attempt.heartbeat_at = now
+
+    def _record_relation_extraction_success(
+        self,
+        claimed: ClaimedIngestionJob,
+        artifact: RelationsArtifact,
+    ) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            document.relations_storage_object_key = artifact.object_key
+            document.relations_storage_version = artifact.storage_version
+            document.failure_code = None
+            document.updated_at = now
+            job.current_stage = "GRAPH_STORE"
+            job.last_error_code = None
+            job.updated_at = now
+            attempt.current_stage = "GRAPH_STORE"
             attempt.heartbeat_at = now

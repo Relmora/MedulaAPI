@@ -8,6 +8,20 @@ RabbitMQ consumer
 → ParserRegistry
 → PDF / Markdown / Plain-text parser
 → GCS
+
+Load settings
+     ↓
+Create database connection
+     ↓
+Create GCS storage client
+     ↓
+Create every pipeline stage
+     ↓
+Connect stages to IngestionPipeline
+     ↓
+Connect pipeline to IngestionWorker
+     ↓
+Start consuming RabbitMQ messages
 """
 
 import os
@@ -31,12 +45,17 @@ from backend.ingestion.parsing import (
     PlainTextParser,
 )
 from backend.ingestion.rabbitmq import RabbitMQIngestionConsumer
+from backend.ingestion.relation_extraction import (
+    DocumentRelationExtractor,
+    VertexAIRelationProvider,
+)
 from backend.ingestion.stages import (
     ChunkStage,
     EmbedStage,
     IndexStage,
     NormalizeStage,
     ParseStage,
+    RelationExtractStage,
     SourceValidator,
 )
 from backend.logging import configure_logging
@@ -69,6 +88,20 @@ def build_embedder(settings: Settings) -> DocumentEmbedder:
     return DocumentEmbedder(provider, batch_size=settings.embedding_batch_size)
 
 
+def build_relation_extractor(settings: Settings) -> DocumentRelationExtractor:
+    if not settings.gcp_project_id or not settings.gcp_project_id.strip():
+        raise ValueError(
+            "GCP_PROJECT_ID must be configured for Vertex AI relation extraction"
+        )
+    provider = VertexAIRelationProvider(
+        project_id=settings.gcp_project_id,
+        location=settings.relation_extraction_location,
+        model_name=settings.relation_extraction_model,
+        timeout_seconds=settings.relation_extraction_timeout_seconds,
+    )
+    return DocumentRelationExtractor(provider)
+
+
 def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
     engine = create_database_engine(settings)
     sessions = sessionmaker(engine, class_=Session, expire_on_commit=False)
@@ -91,6 +124,7 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
             ChunkStage(build_chunker(), storage),
             EmbedStage(build_embedder(settings), storage),
             IndexStage(PgVectorIndex(sessions), storage),
+            RelationExtractStage(build_relation_extractor(settings), storage),
         ),
     )
     return RabbitMQIngestionConsumer(settings, worker)
