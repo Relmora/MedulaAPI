@@ -3,6 +3,8 @@
 from backend.models.auth_session import AuthSession
 from backend.models.base import Base
 from backend.models.document import Document
+from backend.models.entity import Entity
+from backend.models.entity_relationship import EntityRelationship
 from backend.models.indexed_chunk import IndexedChunk
 from backend.models.ingestion_job import IngestionJob
 from backend.models.ingestion_job_attempt import IngestionJobAttempt
@@ -15,6 +17,8 @@ __all__ = [
     "AuthSession",
     "Base",
     "Document",
+    "Entity",
+    "EntityRelationship",
     "IngestionJob",
     "IngestionJobAttempt",
     "IndexedChunk",

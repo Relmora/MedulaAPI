@@ -9,6 +9,7 @@ from backend.ingestion.claim import (
     ClaimedIngestionJob,
     IngestionJobClaimer,
 )
+from backend.ingestion.graph_storage import GraphWriteResult
 from backend.ingestion.messages import IngestionRequestedMessage, InvalidMessage
 from backend.ingestion.pipeline import (
     IngestionPipeline,
@@ -40,6 +41,7 @@ class HandleDisposition(StrEnum):
     EMBEDDED = "EMBEDDED"
     INDEXED = "INDEXED"
     RELATIONS_EXTRACTED = "RELATIONS_EXTRACTED"
+    GRAPH_STORED = "GRAPH_STORED"
     ACKNOWLEDGED_SOURCE_REJECTED = "ACKNOWLEDGED_SOURCE_REJECTED"
     ACKNOWLEDGED_PARSE_REJECTED = "ACKNOWLEDGED_PARSE_REJECTED"
     ACKNOWLEDGED_NORMALIZE_REJECTED = "ACKNOWLEDGED_NORMALIZE_REJECTED"
@@ -47,6 +49,7 @@ class HandleDisposition(StrEnum):
     ACKNOWLEDGED_EMBED_REJECTED = "ACKNOWLEDGED_EMBED_REJECTED"
     ACKNOWLEDGED_INDEX_REJECTED = "ACKNOWLEDGED_INDEX_REJECTED"
     ACKNOWLEDGED_RELATION_EXTRACT_REJECTED = "ACKNOWLEDGED_RELATION_EXTRACT_REJECTED"
+    ACKNOWLEDGED_GRAPH_STORE_REJECTED = "ACKNOWLEDGED_GRAPH_STORE_REJECTED"
     REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
@@ -64,6 +67,7 @@ class HandleResult:
     embedded_artifact: EmbeddedArtifact | None = None
     indexed_artifact: IndexedArtifact | None = None
     relations_artifact: RelationsArtifact | None = None
+    graph_write_result: GraphWriteResult | None = None
     reason: str | None = None
 
 
@@ -167,6 +171,28 @@ class IngestionWorker:
                     embedded_artifact=pipeline_result.embedded_artifact,
                     indexed_artifact=pipeline_result.indexed_artifact,
                     reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.GRAPH_STORE_REJECTED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.ACKNOWLEDGED_GRAPH_STORE_REJECTED,
+                    claimed=result.claimed,
+                    relations_artifact=pipeline_result.relations_artifact,
+                    reason=pipeline_result.error_code,
+                )
+            if pipeline_result.disposition is PipelineDisposition.GRAPH_STORED:
+                delivery.acknowledge()
+                return HandleResult(
+                    HandleDisposition.GRAPH_STORED,
+                    claimed=result.claimed,
+                    source=pipeline_result.source,
+                    parsed_artifact=pipeline_result.parsed_artifact,
+                    normalized_artifact=pipeline_result.normalized_artifact,
+                    chunked_artifact=pipeline_result.chunked_artifact,
+                    embedded_artifact=pipeline_result.embedded_artifact,
+                    indexed_artifact=pipeline_result.indexed_artifact,
+                    relations_artifact=pipeline_result.relations_artifact,
+                    graph_write_result=pipeline_result.graph_write_result,
                 )
             if pipeline_result.disposition is PipelineDisposition.RELATIONS_EXTRACTED:
                 return HandleResult(

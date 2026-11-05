@@ -3,13 +3,14 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
     ChunkStage,
     EmbedStage,
+    GraphStoreStage,
     HandleDisposition,
     IndexStage,
     IngestionJobClaimer,
@@ -29,6 +30,11 @@ from backend.ingestion.embedding import (
     EmbeddingError,
     EmbeddingTransientError,
 )
+from backend.ingestion.graph_storage import (
+    GraphStorageError,
+    GraphStorageTransientError,
+    PostgresGraphStore,
+)
 from backend.ingestion.indexing import (
     IndexingError,
     IndexingTransientError,
@@ -47,6 +53,8 @@ from backend.ingestion.relation_extraction import (
 from backend.models import (
     Base,
     Document,
+    Entity,
+    EntityRelationship,
     IndexedChunk,
     IngestionJob,
     IngestionJobAttempt,
@@ -298,6 +306,36 @@ def full_relation_worker(factory, now, storage, provider):
             ),
             IndexStage(PgVectorIndex(factory), storage),
             RelationExtractStage(DocumentRelationExtractor(provider), storage),
+            clock=lambda: now,
+        ),
+    )
+
+
+class FailingGraphStore:
+    def __init__(self, error):
+        self.error = error
+
+    def write(self, document):
+        raise self.error
+
+
+def full_graph_worker(factory, now, storage, provider, *, graph_store=None):
+    return IngestionWorker(
+        IngestionJobClaimer(factory, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            factory,
+            SourceValidator(factory, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            NormalizeStage(DeterministicNormalizer(), storage),
+            ChunkStage(BlockAwareChunker(), storage),
+            EmbedStage(
+                DocumentEmbedder(PipelineIndexingProvider(), batch_size=2),
+                storage,
+            ),
+            IndexStage(PgVectorIndex(factory), storage),
+            RelationExtractStage(DocumentRelationExtractor(provider), storage),
+            GraphStoreStage(graph_store or PostgresGraphStore(factory), storage),
             clock=lambda: now,
         ),
     )
@@ -733,6 +771,106 @@ def test_worker_extracts_relations_and_advances_to_graph_store(ingestion_databas
         assert saved_document.relations_storage_version == "1"
         assert saved_job.current_stage == "GRAPH_STORE"
         assert attempt.current_stage == "GRAPH_STORE"
+
+
+def test_worker_stores_graph_and_completes_ingestion(ingestion_database):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_graph_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.GRAPH_STORED
+    assert result.graph_write_result is not None
+    assert result.graph_write_result.entity_count == 2
+    assert result.graph_write_result.relationship_count == 1
+    assert delivery.acknowledged is True
+    assert delivery.rejected_with is None
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        relationship = db.scalar(select(EntityRelationship))
+        assert db.scalar(select(func.count()).select_from(Entity)) == 2
+        assert relationship.document_id == document.id
+        assert saved_job.status == "SUCCEEDED"
+        assert saved_job.current_stage == "COMPLETE"
+        assert saved_document.processing_status == "READY"
+        assert saved_document.processed_at.replace(tzinfo=UTC) == now
+        assert attempt.status == "SUCCEEDED"
+        assert attempt.current_stage == "COMPLETE"
+
+
+def test_worker_requeues_transient_graph_storage_failure(ingestion_database):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_graph_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(),
+        graph_store=FailingGraphStore(
+            GraphStorageTransientError(
+                "GRAPH_DATABASE_UNAVAILABLE",
+                "The graph database is unavailable.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.reason == "GRAPH_DATABASE_UNAVAILABLE"
+    assert delivery.rejected_with is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        attempt = db.scalar(
+            select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
+        )
+        assert saved_job.status == "RETRY_SCHEDULED"
+        assert saved_job.current_stage == "GRAPH_STORE"
+        assert attempt.current_stage == "GRAPH_STORE"
+
+
+def test_worker_records_permanent_graph_storage_failure(ingestion_database):
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    content = b"Sanjay created MedulaAPI."
+    document, job, storage = add_text_job(ingestion_database, now, content)
+    worker = full_graph_worker(
+        ingestion_database,
+        now,
+        storage,
+        PipelineRelationProvider(),
+        graph_store=FailingGraphStore(
+            GraphStorageError(
+                "GRAPH_WRITE_INVALID",
+                "The resolved graph is invalid.",
+            )
+        ),
+    )
+    delivery = RecordingDelivery()
+
+    result = worker.handle(envelope(job, document), delivery)
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_GRAPH_STORE_REJECTED
+    assert result.reason == "GRAPH_WRITE_INVALID"
+    assert delivery.acknowledged is True
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        assert saved_job.status == "FAILED"
+        assert saved_document.processing_status == "REJECTED"
 
 
 def test_worker_requeues_transient_relation_provider_failure(ingestion_database):

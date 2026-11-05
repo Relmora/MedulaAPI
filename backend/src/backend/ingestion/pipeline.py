@@ -10,6 +10,11 @@ from sqlalchemy import select
 from backend.ingestion.chunking import ChunkingError
 from backend.ingestion.claim import ClaimedIngestionJob, SessionFactory
 from backend.ingestion.embedding import EmbeddingError, EmbeddingTransientError
+from backend.ingestion.graph_storage import (
+    GraphStorageError,
+    GraphStorageTransientError,
+    GraphWriteResult,
+)
 from backend.ingestion.indexing import IndexingError, IndexingTransientError
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
@@ -22,6 +27,7 @@ from backend.ingestion.stages import (
     ChunkStage,
     EmbeddedArtifact,
     EmbedStage,
+    GraphStoreStage,
     IndexedArtifact,
     IndexStage,
     NormalizedArtifact,
@@ -56,6 +62,8 @@ class PipelineDisposition(StrEnum):
     INDEX_REJECTED = "INDEX_REJECTED"
     RELATIONS_EXTRACTED = "RELATIONS_EXTRACTED"
     RELATION_EXTRACT_REJECTED = "RELATION_EXTRACT_REJECTED"
+    GRAPH_STORED = "GRAPH_STORED"
+    GRAPH_STORE_REJECTED = "GRAPH_STORE_REJECTED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
@@ -70,6 +78,7 @@ class PipelineResult:
     embedded_artifact: EmbeddedArtifact | None = None
     indexed_artifact: IndexedArtifact | None = None
     relations_artifact: RelationsArtifact | None = None
+    graph_write_result: GraphWriteResult | None = None
     error_code: str | None = None
 
 
@@ -94,6 +103,7 @@ class IngestionPipeline:
         embed_stage: EmbedStage | None = None,
         index_stage: IndexStage | None = None,
         relation_extract_stage: RelationExtractStage | None = None,
+        graph_store_stage: GraphStoreStage | None = None,
         *,
         clock: Clock = _utc_now,
     ) -> None:
@@ -105,6 +115,7 @@ class IngestionPipeline:
         self._embed_stage = embed_stage
         self._index_stage = index_stage
         self._relation_extract_stage = relation_extract_stage
+        self._graph_store_stage = graph_store_stage
         self._clock = clock
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
@@ -377,8 +388,57 @@ class IngestionPipeline:
                 error_code=error.code,
             )
         self._record_relation_extraction_success(claimed, relations_artifact)
+        if self._graph_store_stage is None:
+            return PipelineResult(
+                PipelineDisposition.RELATIONS_EXTRACTED,
+                source=source,
+                parsed_artifact=artifact,
+                normalized_artifact=normalized_artifact,
+                chunked_artifact=chunked_artifact,
+                embedded_artifact=embedded_artifact,
+                indexed_artifact=indexed_artifact,
+                relations_artifact=relations_artifact,
+            )
+        try:
+            graph_write_result = self._graph_store_stage.execute(relations_artifact)
+        except ObjectStorageUnavailableError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="GRAPH_STORE",
+                code="GRAPH_SOURCE_ARTIFACT_UNAVAILABLE",
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                relations_artifact=relations_artifact,
+                error_code="GRAPH_SOURCE_ARTIFACT_UNAVAILABLE",
+            )
+        except GraphStorageTransientError as error:
+            retry_scheduled = self._record_retryable_failure(
+                claimed,
+                stage="GRAPH_STORE",
+                code=error.code,
+                message=str(error),
+            )
+            return PipelineResult(
+                PipelineDisposition.RETRY_SCHEDULED
+                if retry_scheduled
+                else PipelineDisposition.RETRY_EXHAUSTED,
+                relations_artifact=relations_artifact,
+                error_code=error.code,
+            )
+        except GraphStorageError as error:
+            self._record_permanent_failure(claimed, error)
+            return PipelineResult(
+                PipelineDisposition.GRAPH_STORE_REJECTED,
+                relations_artifact=relations_artifact,
+                error_code=error.code,
+            )
+        self._record_graph_storage_success(claimed)
         return PipelineResult(
-            PipelineDisposition.RELATIONS_EXTRACTED,
+            PipelineDisposition.GRAPH_STORED,
             source=source,
             parsed_artifact=artifact,
             normalized_artifact=normalized_artifact,
@@ -386,6 +446,7 @@ class IngestionPipeline:
             embedded_artifact=embedded_artifact,
             indexed_artifact=indexed_artifact,
             relations_artifact=relations_artifact,
+            graph_write_result=graph_write_result,
         )
 
     def _record_permanent_failure(
@@ -399,6 +460,7 @@ class IngestionPipeline:
             | EmbeddingError
             | IndexingError
             | RelationExtractionError
+            | GraphStorageError
         ),
     ) -> None:
         now = self._aware_now()
@@ -791,3 +853,57 @@ class IngestionPipeline:
             job.updated_at = now
             attempt.current_stage = "GRAPH_STORE"
             attempt.heartbeat_at = now
+
+    def _record_graph_storage_success(self, claimed: ClaimedIngestionJob) -> None:
+        now = self._aware_now()
+        with self._session_factory() as db, db.begin():
+            job = db.scalar(
+                select(IngestionJob)
+                .where(IngestionJob.id == claimed.job_id)
+                .with_for_update()
+            )
+            attempt = db.scalar(
+                select(IngestionJobAttempt)
+                .where(IngestionJobAttempt.id == claimed.attempt_id)
+                .with_for_update()
+            )
+            document = db.scalar(
+                select(Document)
+                .where(Document.id == claimed.document_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or attempt is None
+                or document is None
+                or attempt.job_id != job.id
+                or job.document_id != document.id
+                or attempt.worker_id != claimed.worker_id
+                or attempt.status != "RUNNING"
+                or job.status != "PROCESSING"
+            ):
+                raise LostAttemptOwnershipError(
+                    "ingestion attempt is no longer owned by this worker"
+                )
+
+            attempt.status = "SUCCEEDED"
+            attempt.current_stage = "COMPLETE"
+            attempt.heartbeat_at = now
+            attempt.lease_expires_at = now
+            attempt.finished_at = now
+            attempt.failure_class = None
+            attempt.failure_code = None
+            attempt.failure_message = None
+
+            job.status = "SUCCEEDED"
+            job.current_stage = "COMPLETE"
+            job.claimed_by = None
+            job.lease_expires_at = None
+            job.last_error_code = None
+            job.finished_at = now
+            job.updated_at = now
+
+            document.processing_status = "READY"
+            document.failure_code = None
+            document.processed_at = now
+            document.updated_at = now
