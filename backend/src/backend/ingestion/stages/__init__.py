@@ -12,6 +12,7 @@ from backend.ingestion.stages.normalize_document import (
     NormalizeStage,
 )
 from backend.ingestion.stages.parse_document import ParsedArtifact, ParseStage
+from backend.ingestion.stages.store_graph import GraphStoreStage
 from backend.ingestion.stages.validate_source import (
     SourceValidationError,
     SourceValidator,
@@ -31,6 +32,7 @@ __all__ = [
     "ParsedArtifact",
     "RelationExtractStage",
     "RelationsArtifact",
+    "GraphStoreStage",
     "SourceValidationError",
     "SourceValidator",
     "ValidatedSource",
