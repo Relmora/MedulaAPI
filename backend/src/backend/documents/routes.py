@@ -11,11 +11,14 @@ from backend.auth.sessions import require_trusted_origin
 from backend.database import get_db_session
 from backend.documents import service
 from backend.documents.schemas import (
+    DocumentGraphResponse,
     DocumentProcessingStatus,
     DocumentUploadCompleteRequest,
     DocumentUploadCompleteResponse,
     DocumentUploadIntentCreate,
     DocumentUploadIntentResponse,
+    GraphEdgeResponse,
+    GraphNodeResponse,
     UploadInstructionsResponse,
 )
 from backend.models import User
@@ -35,6 +38,44 @@ router = APIRouter(
 DatabaseSession = Annotated[Session, Depends(get_db_session)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 ConfiguredObjectStorage = Annotated[ObjectStorage, Depends(get_object_storage)]
+
+
+@router.get("/{document_id}/graph", response_model=DocumentGraphResponse)
+def get_document_graph(
+    workspace_id: UUID,
+    knowledge_base_id: UUID,
+    document_id: UUID,
+    db: DatabaseSession,
+    user: CurrentUser,
+) -> DocumentGraphResponse:
+    graph = service.get_document_graph(
+        db,
+        user,
+        workspace_id,
+        knowledge_base_id,
+        document_id,
+    )
+    return DocumentGraphResponse(
+        document_id=graph.document_id,
+        nodes=[
+            GraphNodeResponse(
+                id=node.id,
+                name=node.name,
+                entity_type=node.entity_type,
+            )
+            for node in graph.nodes
+        ],
+        edges=[
+            GraphEdgeResponse(
+                id=edge.id,
+                source=edge.source,
+                target=edge.target,
+                predicate=edge.predicate,
+                chunk_id=edge.chunk_id,
+            )
+            for edge in graph.edges
+        ],
+    )
 
 
 @router.post(
