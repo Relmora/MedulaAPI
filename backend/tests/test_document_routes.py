@@ -243,8 +243,7 @@ def test_document_graph_returns_deduplicated_nodes_and_edges(clients):
     assert {node["id"] for node in graph["nodes"]} == expected_node_ids
     assert len(graph["nodes"]) == 3
     assert {
-        (edge["source"], edge["predicate"], edge["target"])
-        for edge in graph["edges"]
+        (edge["source"], edge["predicate"], edge["target"]) for edge in graph["edges"]
     } == expected_edges
     assert all("chunk_id" in edge for edge in graph["edges"])
 
