@@ -34,6 +34,17 @@ def valid_payload():
     }
 
 
+def create_document_intent(client, path):
+    storage = FakeObjectStorage(provider="gcs", bucket="documents-test")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = client.post(f"{path}/upload-intent", json=valid_payload())
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+    assert response.status_code == 201
+    return response.json()
+
+
 def test_upload_intent_creates_pending_row_and_returns_signed_instructions(clients):
     alice, _, engine = clients
     storage = FakeObjectStorage(provider="gcs", bucket="documents-test")
@@ -53,6 +64,7 @@ def test_upload_intent_creates_pending_row_and_returns_signed_instructions(clien
     assert response.headers["cache-control"] == "no-store"
     with Session(engine) as db:
         document = db.scalar(select(Document))
+        assert document is not None
         assert str(document.id) == body["document_id"]
         assert document.upload_status == "PENDING"
         assert document.storage_provider == "gcs"
@@ -103,6 +115,7 @@ def test_complete_upload_verifies_object_and_is_idempotent(clients):
         intent = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
         with Session(engine) as db:
             document = db.get(Document, UUID(intent["document_id"]))
+            assert document is not None
             object_key = document.storage_object_key
         storage.objects[object_key] = StoredObjectMetadata(
             size_bytes=42,
@@ -127,6 +140,7 @@ def test_complete_upload_verifies_object_and_is_idempotent(clients):
     assert response.headers["cache-control"] == "no-store"
     with Session(engine) as db:
         document = db.get(Document, UUID(intent["document_id"]))
+        assert document is not None
         assert document.upload_status == "STORED"
         assert document.storage_version == "generation-1"
         assert document.processing_status == "QUEUED"
@@ -163,6 +177,7 @@ def test_complete_upload_enforces_ownership_and_origin(clients):
         intent = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
         with Session(engine) as db:
             document = db.get(Document, UUID(intent["document_id"]))
+            assert document is not None
             object_key = document.storage_object_key
         storage.objects[object_key] = StoredObjectMetadata(
             size_bytes=42,
@@ -185,10 +200,11 @@ def test_complete_upload_enforces_ownership_and_origin(clients):
 def test_document_graph_returns_deduplicated_nodes_and_edges(clients):
     alice, _, engine = clients
     path = document_collection(alice)
-    intent = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
+    intent = create_document_intent(alice, path)
     document_id = UUID(intent["document_id"])
     with Session(engine) as db:
         document = db.get(Document, document_id)
+        assert document is not None
         document.processing_status = "READY"
         sanjay = Entity(
             knowledge_base_id=document.knowledge_base_id,
@@ -251,12 +267,14 @@ def test_document_graph_returns_deduplicated_nodes_and_edges(clients):
 def test_document_graph_handles_empty_not_ready_and_private_documents(clients):
     alice, bob, engine = clients
     path = document_collection(alice)
-    first = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
-    second = alice.post(f"{path}/upload-intent", json=valid_payload()).json()
+    first = create_document_intent(alice, path)
+    second = create_document_intent(alice, path)
     ready_id = UUID(first["document_id"])
     pending_id = UUID(second["document_id"])
     with Session(engine) as db:
-        db.get(Document, ready_id).processing_status = "READY"
+        document = db.get(Document, ready_id)
+        assert document is not None
+        document.processing_status = "READY"
         db.commit()
 
     response = alice.get(f"{path}/{ready_id}/graph")
