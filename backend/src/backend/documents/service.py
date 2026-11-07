@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.documents.graph_repository import DocumentGraph, read_document_graph
 from backend.documents.schemas import DocumentUploadIntentCreate
 from backend.errors import AppError
 from backend.knowledge_bases.service import get_knowledge_base
@@ -104,6 +105,35 @@ def get_document(
     if document is None:
         raise AppError("DOCUMENT_NOT_FOUND", "Document not found.", 404)
     return document
+
+
+def get_document_graph(
+    db: Session,
+    user: User,
+    workspace_id: UUID,
+    knowledge_base_id: UUID,
+    document_id: UUID,
+) -> DocumentGraph:
+    """Return a ready document's graph through its owner-scoped hierarchy."""
+
+    document = get_document(
+        db,
+        user,
+        workspace_id,
+        knowledge_base_id,
+        document_id,
+    )
+    if document.processing_status != "READY":
+        raise AppError(
+            "DOCUMENT_GRAPH_NOT_READY",
+            "Document graph is not ready.",
+            409,
+        )
+    return read_document_graph(
+        db,
+        knowledge_base_id=knowledge_base_id,
+        document_id=document.id,
+    )
 
 
 def complete_document_upload(

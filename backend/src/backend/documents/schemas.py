@@ -83,3 +83,29 @@ class DocumentUploadCompleteResponse(BaseModel):
 
 class DocumentUploadCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class GraphNodeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    name: str
+    entity_type: str
+
+
+class GraphEdgeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    source: UUID
+    target: UUID
+    predicate: str
+    chunk_id: UUID
+
+
+class DocumentGraphResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: UUID
+    nodes: list[GraphNodeResponse]
+    edges: list[GraphEdgeResponse]
