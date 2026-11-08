@@ -80,9 +80,7 @@ def get_knowledge_base_graph(
     db: DatabaseSession,
     user: CurrentUser,
 ) -> KnowledgeBaseGraphResponse:
-    graph = service.get_knowledge_base_graph(
-        db, user, workspace_id, knowledge_base_id
-    )
+    graph = service.get_knowledge_base_graph(db, user, workspace_id, knowledge_base_id)
     return KnowledgeBaseGraphResponse(
         knowledge_base_id=graph.knowledge_base_id,
         nodes=[

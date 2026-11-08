@@ -327,9 +327,10 @@ def test_knowledge_base_graph_aggregates_relationships_across_documents(clients)
         "Medula",
         "Bengaluru",
     }
-    assert {
-        edge["predicate"] for edge in graph["edges"]
-    } == {"WORKS_AT", "LOCATED_IN"}
+    assert {edge["predicate"] for edge in graph["edges"]} == {
+        "WORKS_AT",
+        "LOCATED_IN",
+    }
     assert bob.get(f"{knowledge_base_path}/graph").status_code == 404
 
 
