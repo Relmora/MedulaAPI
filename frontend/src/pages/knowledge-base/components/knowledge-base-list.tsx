@@ -5,6 +5,7 @@ import {
   BookOpen,
   ChevronLeft,
   ChevronRight,
+  Network,
   Plus,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router";
@@ -86,24 +87,42 @@ export function KnowledgeBaseList({ workspaceId }: { workspaceId: string }) {
           <>
             <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white">
               {query.data.items.map((base) => (
-                <Link
+                <div
                   key={base.id}
-                  to={`/workspaces/${workspaceId}/knowledge-bases/${base.id}`}
-                  className="group flex items-center gap-4 border-b border-stone-100 px-5 py-4 transition-colors last:border-b-0 hover:bg-stone-50 sm:px-6"
+                  className="flex items-center gap-3 border-b border-stone-100 px-5 py-4 transition-colors last:border-b-0 hover:bg-stone-50 sm:px-6"
                 >
-                  <span className="rounded-xl bg-teal-50 p-3 text-teal-700">
-                    <BookOpen className="size-5" aria-hidden="true" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-base font-normal tracking-[-0.015em] text-stone-950 sm:text-lg">
-                      {base.name}
-                    </h3>
-                    <p className="mt-1 text-xs text-stone-400">
-                      Updated {new Date(base.updated_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <ArrowUpRight className="size-4 text-stone-300 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-teal-700" />
-                </Link>
+                  <Link
+                    to={`/workspaces/${workspaceId}/knowledge-bases/${base.id}`}
+                    className="group flex min-w-0 flex-1 items-center gap-4"
+                  >
+                    <span className="rounded-xl bg-teal-50 p-3 text-teal-700">
+                      <BookOpen className="size-5" aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate text-base font-normal tracking-[-0.015em] text-stone-950 sm:text-lg">
+                        {base.name}
+                      </h3>
+                      <p className="mt-1 text-xs text-stone-400">
+                        Updated {new Date(base.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <ArrowUpRight className="hidden size-4 text-stone-300 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-teal-700 sm:block" />
+                  </Link>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-xl bg-white font-normal"
+                    nativeButton={false}
+                    render={
+                      <Link
+                        to={`/workspaces/${workspaceId}/knowledge-bases/${base.id}/graph`}
+                        aria-label={`View graph for ${base.name}`}
+                      />
+                    }
+                  >
+                    <Network className="size-4" />
+                    <span className="hidden sm:inline">View graph</span>
+                  </Button>
+                </div>
               ))}
             </div>
 

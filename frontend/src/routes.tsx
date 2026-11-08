@@ -5,6 +5,7 @@ import Login from "@/pages/login/login";
 import Workspaces from "@/pages/workspace/workspace";
 import WorkspaceDetail from "@/pages/workspace/workspace-detail";
 import KnowledgeBaseDetail from "@/pages/knowledge-base/knowledge-base";
+import KnowledgeBaseGraphPage from "@/pages/knowledge-base/knowledge-base-graph";
 
 export default function AppRoutes() {
   return (
@@ -17,6 +18,10 @@ export default function AppRoutes() {
         <Route
           path="/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId"
           element={<KnowledgeBaseDetail />}
+        />
+        <Route
+          path="/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/graph"
+          element={<KnowledgeBaseGraphPage />}
         />
         <Route
           path="*"

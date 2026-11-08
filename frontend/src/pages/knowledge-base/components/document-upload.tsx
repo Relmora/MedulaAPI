@@ -1,7 +1,8 @@
 import { useId, useState, type FormEvent } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Upload } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Network, Upload } from "lucide-react";
+import { Link } from "react-router";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,8 +59,25 @@ export function DocumentUpload({
       )}
       {mutation.isSuccess && (
         <Alert role="status">
-          <AlertDescription>
-            Upload verified and stored. Document ID: {mutation.data.document_id}
+          <Network className="size-4" />
+          <AlertTitle>Upload complete</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>
+              The document is queued for processing. Its entities will appear
+              in the knowledge-base graph when they are ready.
+            </p>
+            <Button
+              variant="outline"
+              nativeButton={false}
+              render={
+                <Link
+                  to={`/workspaces/${workspaceId}/knowledge-bases/${knowledgeBaseId}/graph`}
+                />
+              }
+            >
+              <Network className="size-4" />
+              View knowledge base graph
+            </Button>
           </AlertDescription>
         </Alert>
       )}

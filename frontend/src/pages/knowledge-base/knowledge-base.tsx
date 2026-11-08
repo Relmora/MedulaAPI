@@ -15,6 +15,7 @@ import { getKnowledgeBase } from "@/services/knowledge-base";
 import { getErrorMessage } from "@/services/http";
 import { DocumentUpload } from "./components/document-upload";
 import { KnowledgeBaseForm } from "./components/knowledge-base-form";
+import { Network } from "lucide-react";
 
 export default function KnowledgeBaseDetail() {
   const { workspaceId = "", knowledgeBaseId = "" } = useParams();
@@ -79,15 +80,29 @@ function KnowledgeBaseContent({
                 }}
               />
             ) : (
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setEditing(true);
-                  setSaved(false);
-                }}
-              >
-                Rename knowledge base
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEditing(true);
+                    setSaved(false);
+                  }}
+                >
+                  Rename knowledge base
+                </Button>
+                <Button
+                  variant="outline"
+                  nativeButton={false}
+                  render={
+                    <Link
+                      to={`/workspaces/${workspaceId}/knowledge-bases/${knowledgeBaseId}/graph`}
+                    />
+                  }
+                >
+                  <Network className="size-4" />
+                  View graph
+                </Button>
+              </div>
             )}
             {saved && (
               <Alert role="status">

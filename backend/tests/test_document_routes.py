@@ -264,6 +264,75 @@ def test_document_graph_returns_deduplicated_nodes_and_edges(clients):
     assert all("chunk_id" in edge for edge in graph["edges"])
 
 
+def test_knowledge_base_graph_aggregates_relationships_across_documents(clients):
+    alice, bob, engine = clients
+    documents_path = document_collection(alice)
+    first_id = UUID(create_document_intent(alice, documents_path)["document_id"])
+    second_id = UUID(create_document_intent(alice, documents_path)["document_id"])
+    knowledge_base_path = documents_path.removesuffix("/documents")
+
+    with Session(engine) as db:
+        first = db.get(Document, first_id)
+        assert first is not None
+        sanjay = Entity(
+            knowledge_base_id=first.knowledge_base_id,
+            name="Sanjay",
+            normalized_name="sanjay",
+            entity_type="PERSON",
+        )
+        medula = Entity(
+            knowledge_base_id=first.knowledge_base_id,
+            name="Medula",
+            normalized_name="medula",
+            entity_type="ORGANIZATION",
+        )
+        bengaluru = Entity(
+            knowledge_base_id=first.knowledge_base_id,
+            name="Bengaluru",
+            normalized_name="bengaluru",
+            entity_type="LOCATION",
+        )
+        db.add_all((sanjay, medula, bengaluru))
+        db.flush()
+        db.add_all(
+            (
+                EntityRelationship(
+                    knowledge_base_id=first.knowledge_base_id,
+                    subject_entity_id=sanjay.id,
+                    predicate="WORKS_AT",
+                    object_entity_id=medula.id,
+                    document_id=first_id,
+                    chunk_id=uuid4(),
+                ),
+                EntityRelationship(
+                    knowledge_base_id=first.knowledge_base_id,
+                    subject_entity_id=medula.id,
+                    predicate="LOCATED_IN",
+                    object_entity_id=bengaluru.id,
+                    document_id=second_id,
+                    chunk_id=uuid4(),
+                ),
+            )
+        )
+        db.commit()
+
+    response = alice.get(f"{knowledge_base_path}/graph")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    graph = response.json()
+    assert graph["knowledge_base_id"] == knowledge_base_path.rsplit("/", 1)[-1]
+    assert {node["name"] for node in graph["nodes"]} == {
+        "Sanjay",
+        "Medula",
+        "Bengaluru",
+    }
+    assert {
+        edge["predicate"] for edge in graph["edges"]
+    } == {"WORKS_AT", "LOCATED_IN"}
+    assert bob.get(f"{knowledge_base_path}/graph").status_code == 404
+
+
 def test_document_graph_handles_empty_not_ready_and_private_documents(clients):
     alice, bob, engine = clients
     path = document_collection(alice)

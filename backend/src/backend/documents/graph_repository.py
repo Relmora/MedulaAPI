@@ -1,4 +1,4 @@
-"""Read document-scoped graph nodes and edges from PostgreSQL."""
+"""Read document and knowledge-base graph nodes and edges from PostgreSQL."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -30,6 +30,53 @@ class DocumentGraph:
     document_id: UUID
     nodes: tuple[GraphNode, ...]
     edges: tuple[GraphEdge, ...]
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseGraph:
+    knowledge_base_id: UUID
+    nodes: tuple[GraphNode, ...]
+    edges: tuple[GraphEdge, ...]
+
+
+def read_knowledge_base_graph(
+    db: Session,
+    *,
+    knowledge_base_id: UUID,
+) -> KnowledgeBaseGraph:
+    """Return every canonical entity and relationship in a knowledge base."""
+
+    entities = db.scalars(
+        select(Entity)
+        .where(Entity.knowledge_base_id == knowledge_base_id)
+        .order_by(Entity.created_at, Entity.id)
+    ).all()
+    relationships = db.scalars(
+        select(EntityRelationship)
+        .where(EntityRelationship.knowledge_base_id == knowledge_base_id)
+        .order_by(EntityRelationship.created_at, EntityRelationship.id)
+    ).all()
+    return KnowledgeBaseGraph(
+        knowledge_base_id=knowledge_base_id,
+        nodes=tuple(
+            GraphNode(
+                id=entity.id,
+                name=entity.name,
+                entity_type=entity.entity_type,
+            )
+            for entity in entities
+        ),
+        edges=tuple(
+            GraphEdge(
+                id=relationship.id,
+                source=relationship.subject_entity_id,
+                target=relationship.object_entity_id,
+                predicate=relationship.predicate,
+                chunk_id=relationship.chunk_id,
+            )
+            for relationship in relationships
+        ),
+    )
 
 
 def read_document_graph(
