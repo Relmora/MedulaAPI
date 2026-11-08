@@ -5,6 +5,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from backend.documents.graph_repository import (
+    KnowledgeBaseGraph,
+    read_knowledge_base_graph,
+)
 from backend.errors import AppError
 from backend.knowledge_bases.schemas import (
     KnowledgeBaseCreate,
@@ -40,6 +44,18 @@ def get_knowledge_base(
     if knowledge_base is None:
         raise AppError("KNOWLEDGE_BASE_NOT_FOUND", "Knowledge base not found.", 404)
     return knowledge_base
+
+
+def get_knowledge_base_graph(
+    db: Session,
+    user: User,
+    workspace_id: UUID,
+    knowledge_base_id: UUID,
+) -> KnowledgeBaseGraph:
+    """Return the aggregate graph after proving knowledge-base ownership."""
+
+    get_knowledge_base(db, user, workspace_id, knowledge_base_id)
+    return read_knowledge_base_graph(db, knowledge_base_id=knowledge_base_id)
 
 
 def list_knowledge_bases(

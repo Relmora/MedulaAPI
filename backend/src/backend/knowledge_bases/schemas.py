@@ -36,3 +36,29 @@ class KnowledgeBaseListResponse(BaseModel):
     limit: int = Field(ge=1, le=100)
     offset: int = Field(ge=0)
     total: int = Field(ge=0)
+
+
+class KnowledgeBaseGraphNodeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    name: str
+    entity_type: str
+
+
+class KnowledgeBaseGraphEdgeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    source: UUID
+    target: UUID
+    predicate: str
+    chunk_id: UUID
+
+
+class KnowledgeBaseGraphResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_base_id: UUID
+    nodes: list[KnowledgeBaseGraphNodeResponse]
+    edges: list[KnowledgeBaseGraphEdgeResponse]

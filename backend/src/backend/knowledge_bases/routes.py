@@ -10,6 +10,9 @@ from backend.database import get_db_session
 from backend.knowledge_bases import service
 from backend.knowledge_bases.schemas import (
     KnowledgeBaseCreate,
+    KnowledgeBaseGraphEdgeResponse,
+    KnowledgeBaseGraphNodeResponse,
+    KnowledgeBaseGraphResponse,
     KnowledgeBaseListResponse,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
@@ -67,6 +70,37 @@ def get_knowledge_base(
 ) -> KnowledgeBaseResponse:
     return KnowledgeBaseResponse.model_validate(
         service.get_knowledge_base(db, user, workspace_id, knowledge_base_id)
+    )
+
+
+@router.get("/{knowledge_base_id}/graph", response_model=KnowledgeBaseGraphResponse)
+def get_knowledge_base_graph(
+    workspace_id: UUID,
+    knowledge_base_id: UUID,
+    db: DatabaseSession,
+    user: CurrentUser,
+) -> KnowledgeBaseGraphResponse:
+    graph = service.get_knowledge_base_graph(db, user, workspace_id, knowledge_base_id)
+    return KnowledgeBaseGraphResponse(
+        knowledge_base_id=graph.knowledge_base_id,
+        nodes=[
+            KnowledgeBaseGraphNodeResponse(
+                id=node.id,
+                name=node.name,
+                entity_type=node.entity_type,
+            )
+            for node in graph.nodes
+        ],
+        edges=[
+            KnowledgeBaseGraphEdgeResponse(
+                id=edge.id,
+                source=edge.source,
+                target=edge.target,
+                predicate=edge.predicate,
+                chunk_id=edge.chunk_id,
+            )
+            for edge in graph.edges
+        ],
     )
 
 

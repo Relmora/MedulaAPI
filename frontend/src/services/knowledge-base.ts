@@ -2,6 +2,23 @@ import { http, type Page } from "./http";
 import type { Workspace } from "./workspace";
 
 export type KnowledgeBase = Workspace & { workspace_id: string };
+export type GraphNode = {
+  id: string;
+  name: string;
+  entity_type: string;
+};
+export type GraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  predicate: string;
+  chunk_id: string;
+};
+export type KnowledgeBaseGraph = {
+  knowledge_base_id: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
 const path = (workspaceId: string) =>
   `/workspaces/${workspaceId}/knowledge-bases`;
 
@@ -36,5 +53,17 @@ export async function renameKnowledgeBase(
 ) {
   return (
     await http.patch<KnowledgeBase>(`${path(workspaceId)}/${id}`, { name })
+  ).data;
+}
+export async function getKnowledgeBaseGraph(
+  workspaceId: string,
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+) {
+  return (
+    await http.get<KnowledgeBaseGraph>(
+      `${path(workspaceId)}/${knowledgeBaseId}/graph`,
+      { signal },
+    )
   ).data;
 }
