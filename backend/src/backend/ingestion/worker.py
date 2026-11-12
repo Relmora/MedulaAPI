@@ -43,7 +43,7 @@ class HandleDisposition(StrEnum):
     ACKNOWLEDGED_INDEX_REJECTED = "ACKNOWLEDGED_INDEX_REJECTED"
     ACKNOWLEDGED_RELATION_EXTRACT_REJECTED = "ACKNOWLEDGED_RELATION_EXTRACT_REJECTED"
     ACKNOWLEDGED_GRAPH_STORE_REJECTED = "ACKNOWLEDGED_GRAPH_STORE_REJECTED"
-    REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
+    ACKNOWLEDGED_RETRY_SCHEDULED = "ACKNOWLEDGED_RETRY_SCHEDULED"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
     REJECTED_INVALID = "REJECTED_INVALID"
@@ -53,7 +53,6 @@ class DeliveryOutcome(StrEnum):
     """Broker settlement requested after durable worker processing."""
 
     ACKNOWLEDGE = "ACKNOWLEDGE"
-    REJECT_REQUEUE = "REJECT_REQUEUE"
     REJECT_DISCARD = "REJECT_DISCARD"
     LEAVE_UNSETTLED = "LEAVE_UNSETTLED"
 
@@ -256,8 +255,8 @@ class IngestionWorker:
                 )
             if pipeline_result.disposition is PipelineDisposition.RETRY_SCHEDULED:
                 return HandleResult(
-                    HandleDisposition.REQUEUED_TRANSIENT_FAILURE,
-                    delivery_outcome=DeliveryOutcome.REJECT_REQUEUE,
+                    HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )

@@ -60,6 +60,7 @@ from backend.models import (
     IngestionJob,
     IngestionJobAttempt,
     KnowledgeBase,
+    OutboxEvent,
     User,
     Workspace,
 )
@@ -483,7 +484,7 @@ def test_worker_parses_uploads_and_records_artifact_before_normalize(
         assert attempt.current_stage == "NORMALIZE"
 
 
-def test_worker_requeues_temporary_parsed_artifact_upload_failure(
+def test_worker_schedules_retry_for_temporary_parsed_artifact_upload_failure(
     ingestion_database,
 ):
     class UnavailableStorage(FakeObjectStorage):
@@ -518,20 +519,82 @@ def test_worker_requeues_temporary_parsed_artifact_upload_failure(
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "PARSED_ARTIFACT_UPLOAD_FAILED"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
             select(IngestionJobAttempt).where(IngestionJobAttempt.job_id == job.id)
         )
+        retry_event = db.scalar(
+            select(OutboxEvent).where(OutboxEvent.aggregate_id == job.id)
+        )
         assert saved_job.status == "RETRY_SCHEDULED"
         assert saved_job.current_stage == "PARSE"
-        assert saved_job.next_attempt_at.replace(tzinfo=UTC) == now
+        assert saved_job.next_attempt_at.replace(tzinfo=UTC) == now + timedelta(
+            seconds=5
+        )
         assert attempt.status == "FAILED"
         assert attempt.failure_class == "TRANSIENT"
         assert attempt.failure_code == "PARSED_ARTIFACT_UPLOAD_FAILED"
+        assert retry_event is not None
+        assert retry_event.available_at.replace(tzinfo=UTC) == now + timedelta(
+            seconds=5
+        )
+        assert retry_event.payload == {
+            "job_id": str(job.id),
+            "document_id": str(document.id),
+            "purpose": "INITIAL_INGESTION",
+        }
+
+
+def test_worker_exhausts_transient_failure_without_scheduling_another_event(
+    ingestion_database,
+):
+    class UnavailableStorage(FakeObjectStorage):
+        def write_object(self, object_key, content, *, content_type):
+            raise ObjectStorageUnavailableError("GCS temporarily unavailable")
+
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    content = b"Do not retry this document again."
+    document, job = add_queued_job(ingestion_database, now, size=len(content))
+    with ingestion_database() as db, db.begin():
+        saved_document = db.get(Document, document.id)
+        saved_document.original_filename = "notes.txt"
+        saved_document.declared_content_type = "text/plain"
+        db.get(IngestionJob, job.id).max_attempts = 1
+    storage = UnavailableStorage(provider="gcs", bucket="documents")
+    storage.objects[document.storage_object_key] = StoredObjectMetadata(
+        size_bytes=len(content),
+        content_type="text/plain",
+        version="123",
+        checksum="checksum",
+        checksum_algorithm="crc32c",
+    )
+    storage.object_contents[document.storage_object_key] = content
+    worker = IngestionWorker(
+        IngestionJobClaimer(ingestion_database, clock=lambda: now),
+        worker_id="worker-1",
+        pipeline=IngestionPipeline(
+            ingestion_database,
+            SourceValidator(ingestion_database, storage),
+            ParseStage(ParserRegistry([PlainTextParser()]), storage),
+            clock=lambda: now,
+        ),
+    )
+
+    result = worker.handle(envelope(job, document))
+
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_EXHAUSTED
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
+    with ingestion_database() as db:
+        saved_job = db.get(IngestionJob, job.id)
+        saved_document = db.get(Document, document.id)
+        assert saved_job.status == "FAILED"
+        assert saved_job.next_attempt_at is None
+        assert saved_document.processing_status == "FAILED"
+        assert db.scalar(select(func.count()).select_from(OutboxEvent)) == 0
 
 
 def test_worker_normalizes_uploads_and_advances_to_chunk(ingestion_database):
@@ -771,7 +834,7 @@ def test_worker_stores_graph_and_completes_ingestion(ingestion_database):
         assert attempt.current_stage == "COMPLETE"
 
 
-def test_worker_requeues_transient_graph_storage_failure(ingestion_database):
+def test_worker_schedules_retry_for_transient_graph_storage_failure(ingestion_database):
     now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
     content = b"Sanjay created MedulaAPI."
     document, job, storage = add_text_job(ingestion_database, now, content)
@@ -789,9 +852,9 @@ def test_worker_requeues_transient_graph_storage_failure(ingestion_database):
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "GRAPH_DATABASE_UNAVAILABLE"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -830,7 +893,9 @@ def test_worker_records_permanent_graph_storage_failure(ingestion_database):
         assert saved_document.processing_status == "REJECTED"
 
 
-def test_worker_requeues_transient_relation_provider_failure(ingestion_database):
+def test_worker_schedules_retry_for_transient_relation_provider_failure(
+    ingestion_database,
+):
     now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
     content = b"Sanjay created MedulaAPI."
     document, job, storage = add_text_job(ingestion_database, now, content)
@@ -847,9 +912,9 @@ def test_worker_requeues_transient_relation_provider_failure(ingestion_database)
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "RELATION_PROVIDER_UNAVAILABLE"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -893,7 +958,7 @@ def test_worker_records_permanent_relation_failure_before_acknowledging(
         assert saved_document.processing_status == "REJECTED"
 
 
-def test_worker_requeues_transient_index_failure(ingestion_database):
+def test_worker_schedules_retry_for_transient_index_failure(ingestion_database):
     now = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
     content = b"Retry vector indexing."
     document, job, storage = add_text_job(ingestion_database, now, content)
@@ -910,9 +975,9 @@ def test_worker_requeues_transient_index_failure(ingestion_database):
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "INDEX_DATABASE_UNAVAILABLE"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -924,7 +989,7 @@ def test_worker_requeues_transient_index_failure(ingestion_database):
         assert attempt.failure_class == "TRANSIENT"
 
 
-def test_worker_requeues_temporary_index_source_download_failure(
+def test_worker_schedules_retry_for_temporary_index_source_download_failure(
     ingestion_database,
 ):
     class IndexReadUnavailableStorage(FakeObjectStorage):
@@ -945,9 +1010,9 @@ def test_worker_requeues_temporary_index_source_download_failure(
     worker = full_indexing_worker(ingestion_database, now, storage)
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "INDEX_SOURCE_ARTIFACT_UNAVAILABLE"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -990,7 +1055,9 @@ def test_worker_acknowledges_permanent_index_rejection(ingestion_database):
         assert attempt.failure_class == "PERMANENT"
 
 
-def test_worker_requeues_transient_embedding_provider_failure(ingestion_database):
+def test_worker_schedules_retry_for_transient_embedding_provider_failure(
+    ingestion_database,
+):
     now = datetime(2026, 11, 2, 11, 0, tzinfo=UTC)
     content = b"Retry embedding."
     document, job, storage = add_text_job(ingestion_database, now, content)
@@ -1007,9 +1074,9 @@ def test_worker_requeues_transient_embedding_provider_failure(ingestion_database
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "EMBED_PROVIDER_RATE_LIMITED"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1054,7 +1121,7 @@ def test_worker_acknowledges_permanent_embedding_rejection(ingestion_database):
         assert attempt.failure_class == "PERMANENT"
 
 
-def test_worker_requeues_temporary_embedded_artifact_upload_failure(
+def test_worker_schedules_retry_for_temporary_embedded_artifact_upload_failure(
     ingestion_database,
 ):
     class EmbeddedUploadUnavailableStorage(FakeObjectStorage):
@@ -1084,9 +1151,9 @@ def test_worker_requeues_temporary_embedded_artifact_upload_failure(
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "EMBEDDED_ARTIFACT_UPLOAD_FAILED"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1098,7 +1165,7 @@ def test_worker_requeues_temporary_embedded_artifact_upload_failure(
         assert attempt.failure_code == "EMBEDDED_ARTIFACT_UPLOAD_FAILED"
 
 
-def test_worker_requeues_temporary_chunked_artifact_upload_failure(
+def test_worker_schedules_retry_for_temporary_chunked_artifact_upload_failure(
     ingestion_database,
 ):
     class ChunkedUploadUnavailableStorage(FakeObjectStorage):
@@ -1141,9 +1208,9 @@ def test_worker_requeues_temporary_chunked_artifact_upload_failure(
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "CHUNKED_ARTIFACT_UPLOAD_FAILED"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1216,7 +1283,7 @@ def test_worker_acknowledges_permanent_chunking_rejection(ingestion_database):
         assert saved_document.failure_code == "CHUNK_PROVENANCE_INVALID"
 
 
-def test_worker_requeues_temporary_normalized_artifact_upload_failure(
+def test_worker_schedules_retry_for_temporary_normalized_artifact_upload_failure(
     ingestion_database,
 ):
     class NormalizedUploadUnavailableStorage(FakeObjectStorage):
@@ -1261,9 +1328,9 @@ def test_worker_requeues_temporary_normalized_artifact_upload_failure(
     )
     result = worker.handle(envelope(job, document))
 
-    assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
+    assert result.disposition is HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED
     assert result.reason == "NORMALIZED_ARTIFACT_UPLOAD_FAILED"
-    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(

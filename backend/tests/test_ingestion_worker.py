@@ -190,6 +190,32 @@ def test_duplicate_delivery_does_not_create_another_attempt(ingestion_database):
         assert len(db.scalars(select(IngestionJobAttempt)).all()) == 1
 
 
+def test_scheduled_retry_cannot_be_claimed_before_it_is_due(ingestion_database):
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    document, job = add_queued_job(ingestion_database, now)
+    retry_at = now + timedelta(seconds=5)
+    with ingestion_database() as db, db.begin():
+        saved_job = db.get(IngestionJob, job.id)
+        saved_job.status = "RETRY_SCHEDULED"
+        saved_job.next_attempt_at = retry_at
+
+    incoming = message(job, document)
+    early = IngestionJobClaimer(
+        ingestion_database,
+        clock=lambda: now,
+    ).claim(incoming, worker_id="worker-early")
+    due = IngestionJobClaimer(
+        ingestion_database,
+        clock=lambda: retry_at,
+    ).claim(incoming, worker_id="worker-due")
+
+    assert early.disposition is ClaimDisposition.OBSOLETE
+    assert early.reason == "JOB_NOT_RUNNABLE"
+    assert due.disposition is ClaimDisposition.CLAIMED
+    assert due.claimed is not None
+    assert due.claimed.attempt_number == 1
+
+
 def test_failed_attempt_insert_rolls_back_the_job_and_document(ingestion_database):
     now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
     document, job = add_queued_job(ingestion_database, now)

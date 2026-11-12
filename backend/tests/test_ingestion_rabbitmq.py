@@ -142,21 +142,13 @@ def test_consumer_uses_durable_topology_manual_ack_and_bounded_prefetch():
     )
     assert channel.acknowledged == [{"delivery_tag": 18}]
 
-    handler.outcome = DeliveryOutcome.REJECT_REQUEUE
+    handler.outcome = DeliveryOutcome.REJECT_DISCARD
     callback(
         channel,
         SimpleNamespace(delivery_tag=19),
         SimpleNamespace(),
-        b"retry",
-    )
-    handler.outcome = DeliveryOutcome.REJECT_DISCARD
-    callback(
-        channel,
-        SimpleNamespace(delivery_tag=20),
-        SimpleNamespace(),
         b"discard",
     )
     assert channel.rejected == [
-        {"delivery_tag": 19, "requeue": True},
-        {"delivery_tag": 20, "requeue": False},
+        {"delivery_tag": 19, "requeue": False},
     ]

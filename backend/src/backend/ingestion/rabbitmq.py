@@ -61,8 +61,6 @@ def settle_delivery(
 
     if outcome is DeliveryOutcome.ACKNOWLEDGE:
         delivery.acknowledge()
-    elif outcome is DeliveryOutcome.REJECT_REQUEUE:
-        delivery.reject(requeue=True)
     elif outcome is DeliveryOutcome.REJECT_DISCARD:
         delivery.reject(requeue=False)
 

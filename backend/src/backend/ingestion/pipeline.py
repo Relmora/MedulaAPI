@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -16,6 +16,11 @@ from backend.ingestion.graph_storage import (
     GraphWriteResult,
 )
 from backend.ingestion.indexing import IndexingError, IndexingTransientError
+from backend.ingestion.messages import (
+    INGESTION_JOB_AGGREGATE,
+    INGESTION_REQUESTED_EVENT,
+    SUPPORTED_SCHEMA_VERSION,
+)
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
 from backend.ingestion.relation_extraction import (
@@ -40,11 +45,13 @@ from backend.ingestion.stages import (
     SourceValidator,
     ValidatedSource,
 )
-from backend.models import Document, IngestionJob, IngestionJobAttempt
+from backend.models import Document, IngestionJob, IngestionJobAttempt, OutboxEvent
 from backend.object_storage import ObjectStorageUnavailableError
 
 Clock = Callable[[], datetime]
+RetryDelay = Callable[[int], timedelta]
 MAX_FAILURE_MESSAGE_LENGTH = 4000
+MAX_RETRY_DELAY = timedelta(minutes=5)
 
 
 class PipelineDisposition(StrEnum):
@@ -90,6 +97,12 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _exponential_retry_delay(attempt_number: int) -> timedelta:
+    if attempt_number <= 0:
+        raise ValueError("attempt_number must be positive")
+    return min(timedelta(seconds=5 * (2 ** (attempt_number - 1))), MAX_RETRY_DELAY)
+
+
 class IngestionPipeline:
     """Run implemented stages and durably record permanent source rejection."""
 
@@ -106,6 +119,7 @@ class IngestionPipeline:
         graph_store_stage: GraphStoreStage | None = None,
         *,
         clock: Clock = _utc_now,
+        retry_delay: RetryDelay = _exponential_retry_delay,
     ) -> None:
         self._session_factory = session_factory
         self._source_validator = source_validator
@@ -117,6 +131,7 @@ class IngestionPipeline:
         self._relation_extract_stage = relation_extract_stage
         self._graph_store_stage = graph_store_stage
         self._clock = clock
+        self._retry_delay = retry_delay
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
         try:
@@ -554,6 +569,12 @@ class IngestionPipeline:
                 )
 
             retry_scheduled = job.attempt_count < job.max_attempts
+            retry_at = None
+            if retry_scheduled:
+                delay = self._retry_delay(job.attempt_count)
+                if delay <= timedelta(0):
+                    raise ValueError("retry_delay must return a positive duration")
+                retry_at = now + delay
             attempt.status = "FAILED"
             attempt.current_stage = stage
             attempt.heartbeat_at = now
@@ -565,7 +586,7 @@ class IngestionPipeline:
 
             job.status = "RETRY_SCHEDULED" if retry_scheduled else "FAILED"
             job.current_stage = stage
-            job.next_attempt_at = now if retry_scheduled else None
+            job.next_attempt_at = retry_at
             job.claimed_by = None
             job.lease_expires_at = None
             job.last_error_code = code
@@ -576,6 +597,21 @@ class IngestionPipeline:
             document.failure_code = code
             document.processed_at = None if retry_scheduled else now
             document.updated_at = now
+            if retry_at is not None:
+                db.add(
+                    OutboxEvent(
+                        event_type=INGESTION_REQUESTED_EVENT,
+                        aggregate_type=INGESTION_JOB_AGGREGATE,
+                        aggregate_id=job.id,
+                        schema_version=SUPPORTED_SCHEMA_VERSION,
+                        payload={
+                            "job_id": str(job.id),
+                            "document_id": str(document.id),
+                            "purpose": job.purpose,
+                        },
+                        available_at=retry_at,
+                    )
+                )
             return retry_scheduled
 
     def _record_parse_success(
