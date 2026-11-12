@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
     ChunkStage,
+    DeliveryOutcome,
     EmbedStage,
     GraphStoreStage,
     HandleDisposition,
@@ -182,18 +183,6 @@ def claim(factory, document, job, now):
     )
     assert result.claimed is not None
     return result.claimed
-
-
-class RecordingDelivery:
-    def __init__(self) -> None:
-        self.acknowledged = False
-        self.rejected_with = None
-
-    def acknowledge(self) -> None:
-        self.acknowledged = True
-
-    def reject(self, *, requeue: bool) -> None:
-        self.rejected_with = requeue
 
 
 class PipelineEmbeddingProvider:
@@ -403,13 +392,11 @@ def test_worker_records_source_rejection_before_acknowledging(ingestion_database
         worker_id="worker-1",
         pipeline=pipeline,
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_SOURCE_REJECTED
     assert result.reason == "SOURCE_SIGNATURE_INVALID"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -440,15 +427,12 @@ def test_worker_keeps_valid_source_unacknowledged_for_parse(ingestion_database):
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.SOURCE_VALIDATED
     assert result.source is not None
     assert result.source.content == content
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
 
 
 def test_worker_parses_uploads_and_records_artifact_before_normalize(
@@ -479,16 +463,14 @@ def test_worker_parses_uploads_and_records_artifact_before_normalize(
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     expected_key = f"documents/{document.id}/parsed/123.json"
     assert result.disposition is HandleDisposition.PARSED
     assert result.parsed_artifact is not None
     assert result.parsed_artifact.object_key == expected_key
     assert b'"First paragraph."' in storage.object_contents[expected_key]
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -534,14 +516,11 @@ def test_worker_requeues_temporary_parsed_artifact_upload_failure(
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "PARSED_ARTIFACT_UPLOAD_FAILED"
-    assert delivery.rejected_with is True
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -582,17 +561,14 @@ def test_worker_normalizes_uploads_and_advances_to_chunk(ingestion_database):
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     expected_key = f"documents/{document.id}/normalized/123/deterministic-v1.json"
     assert result.disposition is HandleDisposition.NORMALIZED
     assert result.normalized_artifact is not None
     assert result.normalized_artifact.object_key == expected_key
     assert result.normalized_artifact.document.blocks[0].text == "Café value"
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -633,9 +609,7 @@ def test_worker_chunks_uploads_and_advances_to_embed(ingestion_database):
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.CHUNKED
     assert result.chunked_artifact is not None
@@ -645,8 +619,7 @@ def test_worker_chunks_uploads_and_advances_to_embed(ingestion_database):
     assert result.chunked_artifact.document.chunks[0].text == (
         "First paragraph.\n\nSecond paragraph for chunking."
     )
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -676,9 +649,7 @@ def test_worker_embeds_uploads_and_advances_to_index(ingestion_database):
         storage,
         PipelineEmbeddingProvider(),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.EMBEDDED
     assert result.embedded_artifact is not None
@@ -688,8 +659,7 @@ def test_worker_embeds_uploads_and_advances_to_index(ingestion_database):
     assert len(result.embedded_artifact.document.embeddings) == len(
         result.chunked_artifact.document.chunks
     )
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -712,16 +682,13 @@ def test_worker_indexes_chunks_and_advances_to_relation_extraction(
     content = b"First paragraph.\n\nSecond paragraph for vector indexing."
     document, job, storage = add_text_job(ingestion_database, now, content)
     worker = full_indexing_worker(ingestion_database, now, storage)
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.INDEXED
     assert result.indexed_artifact is not None
     assert result.indexed_artifact.document_id == document.id
     assert result.indexed_artifact.chunk_count == 1
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -747,16 +714,13 @@ def test_worker_extracts_relations_and_advances_to_graph_store(ingestion_databas
         storage,
         PipelineRelationProvider(),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.RELATIONS_EXTRACTED
     assert result.relations_artifact is not None
     assert result.relations_artifact.document.document_id == document.id
     assert result.relations_artifact.document.statistics.relation_count == 1
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
     stored = json.loads(storage.object_contents[result.relations_artifact.object_key])
     assert stored["chunks"][0]["relations"][0]["type"] == "CREATED"
     with ingestion_database() as db:
@@ -783,16 +747,13 @@ def test_worker_stores_graph_and_completes_ingestion(ingestion_database):
         storage,
         PipelineRelationProvider(),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.GRAPH_STORED
     assert result.graph_write_result is not None
     assert result.graph_write_result.entity_count == 2
     assert result.graph_write_result.relationship_count == 1
-    assert delivery.acknowledged is True
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -826,13 +787,11 @@ def test_worker_requeues_transient_graph_storage_failure(ingestion_database):
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "GRAPH_DATABASE_UNAVAILABLE"
-    assert delivery.rejected_with is True
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -859,13 +818,11 @@ def test_worker_records_permanent_graph_storage_failure(ingestion_database):
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_GRAPH_STORE_REJECTED
     assert result.reason == "GRAPH_WRITE_INVALID"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -888,14 +845,11 @@ def test_worker_requeues_transient_relation_provider_failure(ingestion_database)
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "RELATION_PROVIDER_UNAVAILABLE"
-    assert delivery.rejected_with is True
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -925,15 +879,13 @@ def test_worker_records_permanent_relation_failure_before_acknowledging(
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is (
         HandleDisposition.ACKNOWLEDGED_RELATION_EXTRACT_REJECTED
     )
     assert result.reason == "RELATION_PROVIDER_OUTPUT_INVALID"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -956,14 +908,11 @@ def test_worker_requeues_transient_index_failure(ingestion_database):
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "INDEX_DATABASE_UNAVAILABLE"
-    assert delivery.rejected_with is True
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -994,13 +943,11 @@ def test_worker_requeues_temporary_index_source_download_failure(
         storage=storage,
     )
     worker = full_indexing_worker(ingestion_database, now, storage)
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "INDEX_SOURCE_ARTIFACT_UNAVAILABLE"
-    assert delivery.rejected_with is True
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1026,13 +973,11 @@ def test_worker_acknowledges_permanent_index_rejection(ingestion_database):
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_INDEX_REJECTED
     assert result.reason == "INDEX_PROVENANCE_MISMATCH"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -1060,14 +1005,11 @@ def test_worker_requeues_transient_embedding_provider_failure(ingestion_database
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "EMBED_PROVIDER_RATE_LIMITED"
-    assert delivery.rejected_with is True
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1095,13 +1037,11 @@ def test_worker_acknowledges_permanent_embedding_rejection(ingestion_database):
             )
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_EMBED_REJECTED
     assert result.reason == "EMBED_PROVIDER_OUTPUT_INVALID"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -1142,14 +1082,11 @@ def test_worker_requeues_temporary_embedded_artifact_upload_failure(
         storage,
         PipelineEmbeddingProvider(),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "EMBEDDED_ARTIFACT_UPLOAD_FAILED"
-    assert delivery.rejected_with is True
-    assert delivery.acknowledged is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1202,13 +1139,11 @@ def test_worker_requeues_temporary_chunked_artifact_upload_failure(
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "CHUNKED_ARTIFACT_UPLOAD_FAILED"
-    assert delivery.rejected_with is True
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1268,13 +1203,11 @@ def test_worker_acknowledges_permanent_chunking_rejection(ingestion_database):
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_CHUNK_REJECTED
     assert result.reason == "CHUNK_PROVENANCE_INVALID"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)
@@ -1326,13 +1259,11 @@ def test_worker_requeues_temporary_normalized_artifact_upload_failure(
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.REQUEUED_TRANSIENT_FAILURE
     assert result.reason == "NORMALIZED_ARTIFACT_UPLOAD_FAILED"
-    assert delivery.rejected_with is True
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_REQUEUE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         attempt = db.scalar(
@@ -1370,13 +1301,11 @@ def test_worker_acknowledges_permanent_normalization_rejection(ingestion_databas
             clock=lambda: now,
         ),
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(envelope(job, document), delivery)
+    result = worker.handle(envelope(job, document))
 
     assert result.disposition is HandleDisposition.ACKNOWLEDGED_NORMALIZE_REJECTED
     assert result.reason == "NORMALIZE_NO_TEXT"
-    assert delivery.acknowledged is True
+    assert result.delivery_outcome is DeliveryOutcome.ACKNOWLEDGE
     with ingestion_database() as db:
         saved_job = db.get(IngestionJob, job.id)
         saved_document = db.get(Document, document.id)

@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
     ClaimDisposition,
+    DeliveryOutcome,
     HandleDisposition,
     IngestionJobClaimer,
     IngestionRequestedMessage,
@@ -220,18 +221,6 @@ def test_failed_attempt_insert_rolls_back_the_job_and_document(ingestion_databas
         assert saved_document.processing_status == "QUEUED"
 
 
-class RecordingDelivery:
-    def __init__(self) -> None:
-        self.acknowledged = False
-        self.rejected_with: bool | None = None
-
-    def acknowledge(self) -> None:
-        self.acknowledged = True
-
-    def reject(self, *, requeue: bool) -> None:
-        self.rejected_with = requeue
-
-
 def test_worker_leaves_successful_claim_unacknowledged(ingestion_database):
     now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
     document, job = add_queued_job(ingestion_database, now)
@@ -239,13 +228,10 @@ def test_worker_leaves_successful_claim_unacknowledged(ingestion_database):
         IngestionJobClaimer(ingestion_database, clock=lambda: now),
         worker_id="worker-1",
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(json.dumps(envelope(job, document)).encode(), delivery)
+    result = worker.handle(json.dumps(envelope(job, document)).encode())
 
     assert result.disposition is HandleDisposition.CLAIMED
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
 
 
 def test_worker_rejects_invalid_message_without_requeue(ingestion_database):
@@ -253,10 +239,7 @@ def test_worker_rejects_invalid_message_without_requeue(ingestion_database):
         IngestionJobClaimer(ingestion_database),
         worker_id="worker-1",
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(b"not-json", delivery)
+    result = worker.handle(b"not-json")
 
     assert result.disposition is HandleDisposition.REJECTED_INVALID
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_DISCARD

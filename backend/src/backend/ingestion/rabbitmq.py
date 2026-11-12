@@ -11,13 +11,13 @@ from pika.adapters.blocking_connection import BlockingChannel, BlockingConnectio
 from pika.spec import Basic, BasicProperties
 
 from backend.config import Settings
-from backend.ingestion.worker import Delivery
+from backend.ingestion.worker import DeliveryOutcome, HandleResult
 
 ConnectionFactory = Callable[[pika.ConnectionParameters], BlockingConnection]
 
 
 class DeliveryHandler(Protocol):
-    def handle(self, body: bytes, delivery: Delivery) -> object: ...
+    def handle(self, body: bytes) -> HandleResult: ...
 
 
 @dataclass
@@ -44,12 +44,27 @@ def build_delivery_callback(handler: DeliveryHandler):
         _properties: BasicProperties,
         body: bytes,
     ) -> None:
-        handler.handle(
-            body,
+        result = handler.handle(body)
+        settle_delivery(
             RabbitMQDelivery(channel=channel, delivery_tag=method.delivery_tag),
+            result.delivery_outcome,
         )
 
     return on_message
+
+
+def settle_delivery(
+    delivery: RabbitMQDelivery,
+    outcome: DeliveryOutcome,
+) -> None:
+    """Translate a broker-neutral worker outcome into one RabbitMQ action."""
+
+    if outcome is DeliveryOutcome.ACKNOWLEDGE:
+        delivery.acknowledge()
+    elif outcome is DeliveryOutcome.REJECT_REQUEUE:
+        delivery.reject(requeue=True)
+    elif outcome is DeliveryOutcome.REJECT_DISCARD:
+        delivery.reject(requeue=False)
 
 
 class RabbitMQIngestionConsumer:
