@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
 
 from backend.ingestion.claim import (
     ClaimDisposition,
@@ -10,6 +9,7 @@ from backend.ingestion.claim import (
     IngestionJobClaimer,
 )
 from backend.ingestion.graph_storage import GraphWriteResult
+from backend.ingestion.lease import IngestionLeaseHeartbeat
 from backend.ingestion.messages import IngestionRequestedMessage, InvalidMessage
 from backend.ingestion.pipeline import (
     IngestionPipeline,
@@ -24,12 +24,6 @@ from backend.ingestion.stages import (
     RelationsArtifact,
     ValidatedSource,
 )
-
-
-class Delivery(Protocol):
-    def acknowledge(self) -> None: ...
-
-    def reject(self, *, requeue: bool) -> None: ...
 
 
 class HandleDisposition(StrEnum):
@@ -50,15 +44,24 @@ class HandleDisposition(StrEnum):
     ACKNOWLEDGED_INDEX_REJECTED = "ACKNOWLEDGED_INDEX_REJECTED"
     ACKNOWLEDGED_RELATION_EXTRACT_REJECTED = "ACKNOWLEDGED_RELATION_EXTRACT_REJECTED"
     ACKNOWLEDGED_GRAPH_STORE_REJECTED = "ACKNOWLEDGED_GRAPH_STORE_REJECTED"
-    REQUEUED_TRANSIENT_FAILURE = "REQUEUED_TRANSIENT_FAILURE"
+    ACKNOWLEDGED_RETRY_SCHEDULED = "ACKNOWLEDGED_RETRY_SCHEDULED"
     ACKNOWLEDGED_RETRY_EXHAUSTED = "ACKNOWLEDGED_RETRY_EXHAUSTED"
     ACKNOWLEDGED_OBSOLETE = "ACKNOWLEDGED_OBSOLETE"
     REJECTED_INVALID = "REJECTED_INVALID"
 
 
+class DeliveryOutcome(StrEnum):
+    """Broker settlement requested after durable worker processing."""
+
+    ACKNOWLEDGE = "ACKNOWLEDGE"
+    REJECT_DISCARD = "REJECT_DISCARD"
+    LEAVE_UNSETTLED = "LEAVE_UNSETTLED"
+
+
 @dataclass(frozen=True)
 class HandleResult:
     disposition: HandleDisposition
+    delivery_outcome: DeliveryOutcome = DeliveryOutcome.LEAVE_UNSETTLED
     claimed: ClaimedIngestionJob | None = None
     source: ValidatedSource | None = None
     parsed_artifact: ParsedArtifact | None = None
@@ -80,66 +83,72 @@ class IngestionWorker:
         *,
         worker_id: str,
         pipeline: IngestionPipeline | None = None,
+        lease_heartbeat: IngestionLeaseHeartbeat | None = None,
     ) -> None:
         self._claimer = claimer
         self._worker_id = worker_id
         self._pipeline = pipeline
+        self._lease_heartbeat = lease_heartbeat
 
-    def handle(self, body: bytes, delivery: Delivery) -> HandleResult:
+    def handle(self, body: bytes) -> HandleResult:
         try:
             message = IngestionRequestedMessage.from_body(body)
         except InvalidMessage as error:
-            delivery.reject(requeue=False)
             return HandleResult(
                 HandleDisposition.REJECTED_INVALID,
+                delivery_outcome=DeliveryOutcome.REJECT_DISCARD,
                 reason=str(error),
             )
 
         result = self._claimer.claim(message, worker_id=self._worker_id)
         if result.disposition is ClaimDisposition.OBSOLETE:
-            delivery.acknowledge()
             return HandleResult(
                 HandleDisposition.ACKNOWLEDGED_OBSOLETE,
+                delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                 reason=result.reason,
             )
 
         if self._pipeline is not None:
-            pipeline_result = self._pipeline.process(result.claimed)
+            if self._lease_heartbeat is None:
+                pipeline_result = self._pipeline.process(result.claimed)
+            else:
+                with self._lease_heartbeat.maintain(result.claimed):
+                    pipeline_result = self._pipeline.process(result.claimed)
             if pipeline_result.disposition is PipelineDisposition.SOURCE_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_SOURCE_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.PARSE_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_PARSE_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.NORMALIZE_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_NORMALIZE_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.CHUNK_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_CHUNK_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     normalized_artifact=pipeline_result.normalized_artifact,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.EMBED_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_EMBED_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     normalized_artifact=pipeline_result.normalized_artifact,
@@ -147,9 +156,9 @@ class IngestionWorker:
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.INDEX_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_INDEX_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     normalized_artifact=pipeline_result.normalized_artifact,
@@ -161,9 +170,9 @@ class IngestionWorker:
                 pipeline_result.disposition
                 is PipelineDisposition.RELATION_EXTRACT_REJECTED
             ):
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_RELATION_EXTRACT_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     parsed_artifact=pipeline_result.parsed_artifact,
                     normalized_artifact=pipeline_result.normalized_artifact,
@@ -173,17 +182,17 @@ class IngestionWorker:
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.GRAPH_STORE_REJECTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_GRAPH_STORE_REJECTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     relations_artifact=pipeline_result.relations_artifact,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.GRAPH_STORED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.GRAPH_STORED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     source=pipeline_result.source,
                     parsed_artifact=pipeline_result.parsed_artifact,
@@ -252,16 +261,16 @@ class IngestionWorker:
                     parsed_artifact=pipeline_result.parsed_artifact,
                 )
             if pipeline_result.disposition is PipelineDisposition.RETRY_SCHEDULED:
-                delivery.reject(requeue=True)
                 return HandleResult(
-                    HandleDisposition.REQUEUED_TRANSIENT_FAILURE,
+                    HandleDisposition.ACKNOWLEDGED_RETRY_SCHEDULED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )
             if pipeline_result.disposition is PipelineDisposition.RETRY_EXHAUSTED:
-                delivery.acknowledge()
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_RETRY_EXHAUSTED,
+                    delivery_outcome=DeliveryOutcome.ACKNOWLEDGE,
                     claimed=result.claimed,
                     reason=pipeline_result.error_code,
                 )

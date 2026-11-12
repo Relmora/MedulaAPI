@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.ingestion import (
     ClaimDisposition,
+    DeliveryOutcome,
     HandleDisposition,
     IngestionJobClaimer,
     IngestionRequestedMessage,
@@ -189,6 +190,32 @@ def test_duplicate_delivery_does_not_create_another_attempt(ingestion_database):
         assert len(db.scalars(select(IngestionJobAttempt)).all()) == 1
 
 
+def test_scheduled_retry_cannot_be_claimed_before_it_is_due(ingestion_database):
+    now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
+    document, job = add_queued_job(ingestion_database, now)
+    retry_at = now + timedelta(seconds=5)
+    with ingestion_database() as db, db.begin():
+        saved_job = db.get(IngestionJob, job.id)
+        saved_job.status = "RETRY_SCHEDULED"
+        saved_job.next_attempt_at = retry_at
+
+    incoming = message(job, document)
+    early = IngestionJobClaimer(
+        ingestion_database,
+        clock=lambda: now,
+    ).claim(incoming, worker_id="worker-early")
+    due = IngestionJobClaimer(
+        ingestion_database,
+        clock=lambda: retry_at,
+    ).claim(incoming, worker_id="worker-due")
+
+    assert early.disposition is ClaimDisposition.OBSOLETE
+    assert early.reason == "JOB_NOT_RUNNABLE"
+    assert due.disposition is ClaimDisposition.CLAIMED
+    assert due.claimed is not None
+    assert due.claimed.attempt_number == 1
+
+
 def test_failed_attempt_insert_rolls_back_the_job_and_document(ingestion_database):
     now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
     document, job = add_queued_job(ingestion_database, now)
@@ -220,18 +247,6 @@ def test_failed_attempt_insert_rolls_back_the_job_and_document(ingestion_databas
         assert saved_document.processing_status == "QUEUED"
 
 
-class RecordingDelivery:
-    def __init__(self) -> None:
-        self.acknowledged = False
-        self.rejected_with: bool | None = None
-
-    def acknowledge(self) -> None:
-        self.acknowledged = True
-
-    def reject(self, *, requeue: bool) -> None:
-        self.rejected_with = requeue
-
-
 def test_worker_leaves_successful_claim_unacknowledged(ingestion_database):
     now = datetime(2026, 10, 31, 10, 0, tzinfo=UTC)
     document, job = add_queued_job(ingestion_database, now)
@@ -239,13 +254,10 @@ def test_worker_leaves_successful_claim_unacknowledged(ingestion_database):
         IngestionJobClaimer(ingestion_database, clock=lambda: now),
         worker_id="worker-1",
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(json.dumps(envelope(job, document)).encode(), delivery)
+    result = worker.handle(json.dumps(envelope(job, document)).encode())
 
     assert result.disposition is HandleDisposition.CLAIMED
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is None
+    assert result.delivery_outcome is DeliveryOutcome.LEAVE_UNSETTLED
 
 
 def test_worker_rejects_invalid_message_without_requeue(ingestion_database):
@@ -253,10 +265,7 @@ def test_worker_rejects_invalid_message_without_requeue(ingestion_database):
         IngestionJobClaimer(ingestion_database),
         worker_id="worker-1",
     )
-    delivery = RecordingDelivery()
-
-    result = worker.handle(b"not-json", delivery)
+    result = worker.handle(b"not-json")
 
     assert result.disposition is HandleDisposition.REJECTED_INVALID
-    assert delivery.acknowledged is False
-    assert delivery.rejected_with is False
+    assert result.delivery_outcome is DeliveryOutcome.REJECT_DISCARD

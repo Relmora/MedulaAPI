@@ -31,7 +31,12 @@ from backend.ingestion.stages import (
     SourceValidator,
     ValidatedSource,
 )
-from backend.ingestion.worker import HandleDisposition, HandleResult, IngestionWorker
+from backend.ingestion.worker import (
+    DeliveryOutcome,
+    HandleDisposition,
+    HandleResult,
+    IngestionWorker,
+)
 
 __all__ = [
     "ChunkStage",
@@ -44,6 +49,7 @@ __all__ = [
     "ClaimDisposition",
     "ClaimResult",
     "ClaimedIngestionJob",
+    "DeliveryOutcome",
     "HandleDisposition",
     "HandleResult",
     "IngestionJobClaimer",

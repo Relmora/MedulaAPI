@@ -4,14 +4,20 @@ from pydantic import SecretStr
 
 from backend.config import Settings
 from backend.ingestion.rabbitmq import RabbitMQIngestionConsumer
+from backend.ingestion.worker import DeliveryOutcome, HandleDisposition, HandleResult
 
 
 class RecordingHandler:
     def __init__(self) -> None:
-        self.deliveries = []
+        self.bodies = []
+        self.outcome = DeliveryOutcome.LEAVE_UNSETTLED
 
-    def handle(self, body, delivery):
-        self.deliveries.append((body, delivery))
+    def handle(self, body):
+        self.bodies.append(body)
+        return HandleResult(
+            HandleDisposition.CLAIMED,
+            delivery_outcome=self.outcome,
+        )
 
 
 class FakeChannel:
@@ -123,7 +129,26 @@ def test_consumer_uses_durable_topology_manual_ack_and_bounded_prefetch():
         SimpleNamespace(),
         b"message",
     )
-    body, delivery = handler.deliveries[0]
-    assert body == b"message"
-    delivery.acknowledge()
-    assert channel.acknowledged == [{"delivery_tag": 17}]
+    assert handler.bodies == [b"message"]
+    assert channel.acknowledged == []
+    assert channel.rejected == []
+
+    handler.outcome = DeliveryOutcome.ACKNOWLEDGE
+    callback(
+        channel,
+        SimpleNamespace(delivery_tag=18),
+        SimpleNamespace(),
+        b"acknowledge",
+    )
+    assert channel.acknowledged == [{"delivery_tag": 18}]
+
+    handler.outcome = DeliveryOutcome.REJECT_DISCARD
+    callback(
+        channel,
+        SimpleNamespace(delivery_tag=19),
+        SimpleNamespace(),
+        b"discard",
+    )
+    assert channel.rejected == [
+        {"delivery_tag": 19, "requeue": False},
+    ]

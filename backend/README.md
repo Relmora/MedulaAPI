@@ -120,6 +120,21 @@ Interactive documentation: http://127.0.0.1:8000/docs
 
 Restart after editing `.env`. CORS origins must match the browser's exact scheme, hostname, and port. CORS is a browser access policy, not authentication.
 
+## Run ingestion processes
+
+Run each durable ingestion process separately from `backend/`:
+
+```bash
+uv run outbox-publisher
+uv run ingestion-worker
+uv run ingestion-recovery
+```
+
+The recovery process detects expired worker leases and schedules a delayed retry,
+or marks the job failed when its attempt budget is exhausted. Run only one
+recovery process locally; production can run multiple instances because recovery
+claims rows with database locks.
+
 ## Quality checks
 
 ```bash

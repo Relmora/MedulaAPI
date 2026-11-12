@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from backend.ingestion.relation_extraction import (
     RelationExtractionError,
     RelationExtractionTransientError,
 )
+from backend.ingestion.retry import add_ingestion_retry_event, exponential_retry_delay
 from backend.ingestion.stages import (
     ChunkedArtifact,
     ChunkStage,
@@ -44,6 +45,7 @@ from backend.models import Document, IngestionJob, IngestionJobAttempt
 from backend.object_storage import ObjectStorageUnavailableError
 
 Clock = Callable[[], datetime]
+RetryDelay = Callable[[int], timedelta]
 MAX_FAILURE_MESSAGE_LENGTH = 4000
 
 
@@ -106,6 +108,7 @@ class IngestionPipeline:
         graph_store_stage: GraphStoreStage | None = None,
         *,
         clock: Clock = _utc_now,
+        retry_delay: RetryDelay = exponential_retry_delay,
     ) -> None:
         self._session_factory = session_factory
         self._source_validator = source_validator
@@ -117,6 +120,7 @@ class IngestionPipeline:
         self._relation_extract_stage = relation_extract_stage
         self._graph_store_stage = graph_store_stage
         self._clock = clock
+        self._retry_delay = retry_delay
 
     def process(self, claimed: ClaimedIngestionJob) -> PipelineResult:
         try:
@@ -554,6 +558,12 @@ class IngestionPipeline:
                 )
 
             retry_scheduled = job.attempt_count < job.max_attempts
+            retry_at = None
+            if retry_scheduled:
+                delay = self._retry_delay(job.attempt_count)
+                if delay <= timedelta(0):
+                    raise ValueError("retry_delay must return a positive duration")
+                retry_at = now + delay
             attempt.status = "FAILED"
             attempt.current_stage = stage
             attempt.heartbeat_at = now
@@ -565,7 +575,7 @@ class IngestionPipeline:
 
             job.status = "RETRY_SCHEDULED" if retry_scheduled else "FAILED"
             job.current_stage = stage
-            job.next_attempt_at = now if retry_scheduled else None
+            job.next_attempt_at = retry_at
             job.claimed_by = None
             job.lease_expires_at = None
             job.last_error_code = code
@@ -576,6 +586,13 @@ class IngestionPipeline:
             document.failure_code = code
             document.processed_at = None if retry_scheduled else now
             document.updated_at = now
+            if retry_at is not None:
+                add_ingestion_retry_event(
+                    db,
+                    job,
+                    document,
+                    available_at=retry_at,
+                )
             return retry_scheduled
 
     def _record_parse_success(
