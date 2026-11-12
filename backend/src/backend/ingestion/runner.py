@@ -38,6 +38,7 @@ from backend.ingestion.chunking import BlockAwareChunker
 from backend.ingestion.embedding import DocumentEmbedder, VertexAIEmbeddingProvider
 from backend.ingestion.graph_storage import PostgresGraphStore
 from backend.ingestion.indexing import PgVectorIndex
+from backend.ingestion.lease import IngestionLeaseHeartbeat
 from backend.ingestion.normalization import DeterministicNormalizer
 from backend.ingestion.parsing import (
     MarkdownParser,
@@ -112,10 +113,11 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
         project_id=settings.gcp_project_id,
     )
     registry = build_parser_registry()
+    lease_ttl = timedelta(seconds=settings.ingestion_worker_lease_seconds)
     worker = IngestionWorker(
         IngestionJobClaimer(
             sessions,
-            lease_ttl=timedelta(seconds=settings.ingestion_worker_lease_seconds),
+            lease_ttl=lease_ttl,
         ),
         worker_id=create_worker_id(),
         pipeline=IngestionPipeline(
@@ -129,6 +131,7 @@ def build_consumer(settings: Settings) -> RabbitMQIngestionConsumer:
             RelationExtractStage(build_relation_extractor(settings), storage),
             GraphStoreStage(PostgresGraphStore(sessions), storage),
         ),
+        lease_heartbeat=IngestionLeaseHeartbeat(sessions, lease_ttl=lease_ttl),
     )
     return RabbitMQIngestionConsumer(settings, worker)
 

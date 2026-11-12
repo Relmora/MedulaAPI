@@ -9,6 +9,7 @@ from backend.ingestion.claim import (
     IngestionJobClaimer,
 )
 from backend.ingestion.graph_storage import GraphWriteResult
+from backend.ingestion.lease import IngestionLeaseHeartbeat
 from backend.ingestion.messages import IngestionRequestedMessage, InvalidMessage
 from backend.ingestion.pipeline import (
     IngestionPipeline,
@@ -82,10 +83,12 @@ class IngestionWorker:
         *,
         worker_id: str,
         pipeline: IngestionPipeline | None = None,
+        lease_heartbeat: IngestionLeaseHeartbeat | None = None,
     ) -> None:
         self._claimer = claimer
         self._worker_id = worker_id
         self._pipeline = pipeline
+        self._lease_heartbeat = lease_heartbeat
 
     def handle(self, body: bytes) -> HandleResult:
         try:
@@ -106,7 +109,11 @@ class IngestionWorker:
             )
 
         if self._pipeline is not None:
-            pipeline_result = self._pipeline.process(result.claimed)
+            if self._lease_heartbeat is None:
+                pipeline_result = self._pipeline.process(result.claimed)
+            else:
+                with self._lease_heartbeat.maintain(result.claimed):
+                    pipeline_result = self._pipeline.process(result.claimed)
             if pipeline_result.disposition is PipelineDisposition.SOURCE_REJECTED:
                 return HandleResult(
                     HandleDisposition.ACKNOWLEDGED_SOURCE_REJECTED,

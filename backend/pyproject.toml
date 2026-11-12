@@ -27,6 +27,7 @@ dependencies = [
 backend = "backend:main"
 outbox-publisher = "backend.outbox.runner:main"
 ingestion-worker = "backend.ingestion.runner:main"
+ingestion-recovery = "backend.ingestion.recovery_runner:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

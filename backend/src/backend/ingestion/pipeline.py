@@ -16,17 +16,13 @@ from backend.ingestion.graph_storage import (
     GraphWriteResult,
 )
 from backend.ingestion.indexing import IndexingError, IndexingTransientError
-from backend.ingestion.messages import (
-    INGESTION_JOB_AGGREGATE,
-    INGESTION_REQUESTED_EVENT,
-    SUPPORTED_SCHEMA_VERSION,
-)
 from backend.ingestion.normalization import NormalizationError
 from backend.ingestion.parsing import ParseError
 from backend.ingestion.relation_extraction import (
     RelationExtractionError,
     RelationExtractionTransientError,
 )
+from backend.ingestion.retry import add_ingestion_retry_event, exponential_retry_delay
 from backend.ingestion.stages import (
     ChunkedArtifact,
     ChunkStage,
@@ -45,13 +41,12 @@ from backend.ingestion.stages import (
     SourceValidator,
     ValidatedSource,
 )
-from backend.models import Document, IngestionJob, IngestionJobAttempt, OutboxEvent
+from backend.models import Document, IngestionJob, IngestionJobAttempt
 from backend.object_storage import ObjectStorageUnavailableError
 
 Clock = Callable[[], datetime]
 RetryDelay = Callable[[int], timedelta]
 MAX_FAILURE_MESSAGE_LENGTH = 4000
-MAX_RETRY_DELAY = timedelta(minutes=5)
 
 
 class PipelineDisposition(StrEnum):
@@ -97,12 +92,6 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _exponential_retry_delay(attempt_number: int) -> timedelta:
-    if attempt_number <= 0:
-        raise ValueError("attempt_number must be positive")
-    return min(timedelta(seconds=5 * (2 ** (attempt_number - 1))), MAX_RETRY_DELAY)
-
-
 class IngestionPipeline:
     """Run implemented stages and durably record permanent source rejection."""
 
@@ -119,7 +108,7 @@ class IngestionPipeline:
         graph_store_stage: GraphStoreStage | None = None,
         *,
         clock: Clock = _utc_now,
-        retry_delay: RetryDelay = _exponential_retry_delay,
+        retry_delay: RetryDelay = exponential_retry_delay,
     ) -> None:
         self._session_factory = session_factory
         self._source_validator = source_validator
@@ -598,19 +587,11 @@ class IngestionPipeline:
             document.processed_at = None if retry_scheduled else now
             document.updated_at = now
             if retry_at is not None:
-                db.add(
-                    OutboxEvent(
-                        event_type=INGESTION_REQUESTED_EVENT,
-                        aggregate_type=INGESTION_JOB_AGGREGATE,
-                        aggregate_id=job.id,
-                        schema_version=SUPPORTED_SCHEMA_VERSION,
-                        payload={
-                            "job_id": str(job.id),
-                            "document_id": str(document.id),
-                            "purpose": job.purpose,
-                        },
-                        available_at=retry_at,
-                    )
+                add_ingestion_retry_event(
+                    db,
+                    job,
+                    document,
+                    available_at=retry_at,
                 )
             return retry_scheduled
 
