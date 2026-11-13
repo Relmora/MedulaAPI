@@ -13,6 +13,7 @@ Start from the latest main branch with a clean working tree:
 
 ```bash
 git switch main
+
 git pull --ff-only origin main
 git switch -c feat/short-description
 ```
